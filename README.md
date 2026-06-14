@@ -18,7 +18,9 @@ python main.py
 
 - Hold the left mouse button and drag through nodes.
 - Release the mouse button to submit the pattern.
-- Press `Esc` to quit.
+- Hold `Shift` while drawing to store a first layer, then draw a second layer
+  without `Shift` to submit a two-layer pattern.
+- Press `P` or `Esc` during play to pause.
 
 Each ghost carries one to three patterns above its head. Every submitted
 pattern is checked against the first remaining pattern of every active ghost.
@@ -39,9 +41,12 @@ Ghost behavior variants:
 - Wavy: its displayed pattern nodes ripple
 - Forbidden: mixes one red trap pattern among its required patterns
 - Partial: alternates between two halves of its first pattern
+- Creep: hides for several seconds when hit, then reappears faster in a clear position
+- Crease: shows mirrored patterns with a dotted symmetry-axis marker
+- Snarl: carries longer complex patterns, sometimes including two-layer ones
 
-Drawing a red forbidden pattern does not remove one of that ghost's required
-patterns and makes the trap ghost faster. Early waves strongly favor ordinary
+Drawing a red forbidden pattern removes that red trap marker and makes the trap ghost faster.
+Early waves strongly favor ordinary
 slowpokes; special variants become more common later.
 Ghosts pause briefly, then move toward the player with a cubic ease-in-out
 step instead of moving continuously.
@@ -53,12 +58,12 @@ restore two health. Casting it at full health does not consume power. Open the
 Holy power can now hold up to 150. Hover over the `SPELLS` bookmark to review:
 
 - `HEAL` (40): restore two health
-- `REPEL` (35): push nearby ghosts away without defeating them
-- `SANCTIFY` (45): remove gimmicks from nearby ghosts without changing patterns
-- `SLOW` (45): slow only the ghosts present when the spell is cast for 9 seconds
+- `REPEL` (35): push nearby ghosts away and slow them for 1 second
+- `SANCTIFY` (45): remove gimmicks from active ghosts without changing patterns
+- `TRUTH` (45): reveal hidden creeps and clear forbidden trap gimmicks
 
 Defeated ghosts send a holy-power gem toward the HUD instead of showing a
-combat log. Newly spawned ghosts fade in, removed patterns fade out while the
+combat log. Newly spawned ghosts fade in while moving, removed patterns fade out while the
 remaining patterns ease into their new centered positions, and partial-pattern
 ghosts crossfade between pattern halves.
 

@@ -16,8 +16,10 @@ from core import (
     GhostKind,
     PatternInput,
     PatternResult,
+    SpellDefinition,
     SpellManager,
     SpellType,
+    mirrored_pattern,
 )
 
 
@@ -108,29 +110,54 @@ class ExorcismGame:
         self.spell_panel_close_delay = 0.12
         self.spell_panel_hover_grace = 0.0
         self.reward_orbs: list[dict[str, object]] = []
-        self.player_image = self._load_player_image()
-        self.monster_image = self._load_monster_image()
+        self.player_images = self._load_player_images()
+        self.ghost_images = self._load_ghost_images()
+        self.pending_shift_pattern: tuple[int, ...] = ()
+        self.input_shift_layer = False
+        self.input_shift_cancelled = False
         self.start_button = Button(pygame.Rect(490, 465, 220, 64), "START")
         self.retry_button = Button(pygame.Rect(490, 480, 220, 64), "RETRY")
+        self.resume_button = Button(pygame.Rect(490, 330, 220, 64), "RESUME")
+        self.pause_restart_button = Button(pygame.Rect(490, 410, 220, 64), "RESTART")
         self.node_positions = self._make_grid_positions()
 
-    def _load_player_image(self) -> pygame.Surface | None:
-        image_path = Path(__file__).with_name("exorcism_MC.png")
-        if not image_path.exists():
-            return None
-        image = pygame.image.load(image_path).convert_alpha()
-        height = 145
-        width = round(image.get_width() * height / image.get_height())
-        return pygame.transform.smoothscale(image, (width, height))
+    def _load_player_images(self) -> list[pygame.Surface]:
+        frames = [
+            image
+            for index in range(1, 4)
+            if (image := self._load_scaled_image(f"peter_idle{index}.png", 145))
+            is not None
+        ]
+        fallback = self._load_scaled_image("exorcism_MC.png", 145)
+        return frames or ([fallback] if fallback is not None else [])
 
-    def _load_monster_image(self) -> pygame.Surface | None:
-        image_path = Path(__file__).with_name("exorcism_Monster1.png")
+    def _load_scaled_image(self, filename: str, width: int) -> pygame.Surface | None:
+        image_path = Path(__file__).with_name(filename)
         if not image_path.exists():
             return None
         image = pygame.image.load(image_path).convert_alpha()
-        width = 96
         height = round(image.get_height() * width / image.get_width())
         return pygame.transform.smoothscale(image, (width, height))
+
+    def _load_ghost_images(self) -> dict[object, dict[str, pygame.Surface]]:
+        images: dict[object, dict[str, pygame.Surface]] = {}
+        for variant in (1, 2):
+            variant_images: dict[str, pygame.Surface] = {}
+            for state in ("idle", "attacked", "defeated"):
+                image = self._load_scaled_image(f"slow{variant}_{state}.png", 96)
+                if image is not None:
+                    variant_images[state] = image
+            if variant_images:
+                images[variant] = variant_images
+        for name in ("creep", "crease", "snarl"):
+            variant_images = {}
+            for state in ("idle", "attacked", "defeated"):
+                image = self._load_scaled_image(f"{name}_{state}.png", 96)
+                if image is not None:
+                    variant_images[state] = image
+            if variant_images:
+                images[name] = variant_images
+        return images
 
     def _make_grid_positions(self) -> list[tuple[int, int]]:
         positions = []
@@ -159,6 +186,9 @@ class ExorcismGame:
         self.last_drag_position = None
         self.success_pattern = ()
         self.success_timer = 0.0
+        self.pending_shift_pattern = ()
+        self.input_shift_layer = False
+        self.input_shift_cancelled = False
         self.spell_pattern = ()
         self.spell_timer = 0.0
         self.spell_panel_progress = 0.0
@@ -173,7 +203,12 @@ class ExorcismGame:
             if event.type == pygame.QUIT:
                 self.running = False
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                self.running = False
+                if self.state == "playing":
+                    self._pause_game()
+                elif self.state == "paused":
+                    self._resume_game()
+                else:
+                    self.running = False
 
             if self.state == "start":
                 if self.start_button.clicked(event):
@@ -192,7 +227,37 @@ class ExorcismGame:
                 ):
                     self._start_game()
             elif self.state == "playing":
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_p:
+                    self._pause_game()
+                    continue
                 self._handle_pattern_event(event)
+            elif self.state == "paused":
+                if self.resume_button.clicked(event):
+                    self._resume_game()
+                elif self.pause_restart_button.clicked(event):
+                    self._start_game()
+                elif event.type == pygame.KEYDOWN and event.key in (
+                    pygame.K_p,
+                    pygame.K_RETURN,
+                    pygame.K_SPACE,
+                ):
+                    self._resume_game()
+
+    def _pause_game(self) -> None:
+        self.pattern_input.clear()
+        self.last_drag_position = None
+        self.pending_shift_pattern = ()
+        self.input_shift_layer = False
+        self.input_shift_cancelled = False
+        self.state = "paused"
+
+    def _resume_game(self) -> None:
+        self.pattern_input.clear()
+        self.last_drag_position = None
+        self.pending_shift_pattern = ()
+        self.input_shift_layer = False
+        self.input_shift_cancelled = False
+        self.state = "playing"
 
     def _handle_pattern_event(self, event: pygame.event.Event) -> None:
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -200,6 +265,18 @@ class ExorcismGame:
             if node is not None:
                 self.pattern_input.begin(node)
                 self.last_drag_position = event.pos
+                modifiers = pygame.key.get_mods()
+                self.input_shift_layer = bool(
+                    modifiers & (pygame.KMOD_LSHIFT | pygame.KMOD_RSHIFT)
+                )
+                self.input_shift_cancelled = False
+        elif (
+            event.type == pygame.KEYUP
+            and event.key in (pygame.K_LSHIFT, pygame.K_RSHIFT)
+            and self.pattern_input.dragging
+            and self.input_shift_layer
+        ):
+            self.input_shift_cancelled = True
         elif event.type == pygame.MOUSEMOTION and self.pattern_input.dragging:
             self._add_nodes_along_segment(
                 self.last_drag_position or event.pos, event.pos
@@ -215,12 +292,22 @@ class ExorcismGame:
             )
             pattern = self.pattern_input.finish()
             self.last_drag_position = None
-            self._submit_pattern(pattern)
+            if self.input_shift_layer and not self.input_shift_cancelled:
+                self.pending_shift_pattern = pattern
+            elif self.pending_shift_pattern:
+                self._submit_pattern((self.pending_shift_pattern, pattern))
+                self.pending_shift_pattern = ()
+            else:
+                self._submit_pattern(pattern)
+            self.input_shift_layer = False
+            self.input_shift_cancelled = False
 
-    def _submit_pattern(self, pattern: tuple[int, ...]) -> PatternResult:
+    def _submit_pattern(
+        self, pattern: tuple[int, ...] | tuple[tuple[int, ...], tuple[int, ...]]
+    ) -> PatternResult:
         result = self.session.judge_pattern(pattern)
         if self.session.last_match_count or self.session.last_spell_cast:
-            self.success_pattern = pattern
+            self.success_pattern = pattern if pattern and isinstance(pattern[0], int) else ()
             self.success_timer = self.success_duration
         if self.session.last_spell_cast:
             self.spell_pattern = pattern
@@ -368,6 +455,8 @@ class ExorcismGame:
             self._draw_start()
         elif self.state == "playing":
             self._draw_playing()
+        elif self.state == "paused":
+            self._draw_paused()
         else:
             self._draw_gameover()
 
@@ -412,14 +501,37 @@ class ExorcismGame:
             overlay.fill((*self.flash_color, int(75 * self.flash_timer / 0.22)))
             self.screen.blit(overlay, (0, 0))
 
+    def _draw_paused(self) -> None:
+        self._draw_world()
+        self._draw_reward_orbs()
+        self._draw_hud()
+        self._draw_spell_bookmark()
+        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        overlay.fill((6, 7, 17, 185))
+        self.screen.blit(overlay, (0, 0))
+
+        panel = pygame.Surface((420, 300), pygame.SRCALPHA)
+        pygame.draw.rect(panel, (*PANEL, 230), panel.get_rect(), border_radius=14)
+        pygame.draw.rect(panel, (*CYAN, 120), panel.get_rect(), 2, border_radius=14)
+        panel_rect = panel.get_rect(center=(WIDTH // 2, HEIGHT // 2))
+        self.screen.blit(panel, panel_rect)
+
+        title = self.font_large.render("PAUSED", True, WHITE)
+        self.screen.blit(title, title.get_rect(center=(WIDTH // 2, 255)))
+        hint = self.font_small.render("Press P or Esc to resume.", True, MUTED)
+        self.screen.blit(hint, hint.get_rect(center=(WIDTH // 2, 525)))
+        self.resume_button.draw(self.screen, self.font)
+        self.pause_restart_button.draw(self.screen, self.font)
+
     def _draw_world(self) -> None:
         aura = pygame.Surface((164, 164), pygame.SRCALPHA)
         pygame.draw.circle(aura, (*CYAN, 22), (82, 82), 75)
         pygame.draw.circle(aura, (*GOLD, 65), (82, 82), PLAYER_RADIUS + 9, 2)
         self.screen.blit(aura, aura.get_rect(center=PLAYER_POSITION))
-        if self.player_image:
-            rect = self.player_image.get_rect(center=PLAYER_POSITION)
-            self.screen.blit(self.player_image, rect)
+        if self.player_images:
+            frame = self._player_idle_frame()
+            rect = frame.get_rect(center=PLAYER_POSITION)
+            self.screen.blit(frame, rect)
         else:
             pygame.draw.circle(
                 self.screen, (83, 67, 123), PLAYER_POSITION, PLAYER_RADIUS
@@ -434,34 +546,125 @@ class ExorcismGame:
 
         self._draw_large_grid()
 
+    def _player_idle_frame(self) -> pygame.Surface:
+        hold_ms = 1800
+        frame_ms = 260
+        cycle_ms = hold_ms + frame_ms * len(self.player_images)
+        elapsed = pygame.time.get_ticks() % cycle_ms
+        if elapsed < hold_ms:
+            return self.player_images[0]
+        index = min(
+            len(self.player_images) - 1,
+            (elapsed - hold_ms) // frame_ms,
+        )
+        return self.player_images[index]
+
     def _draw_ghost(self, ghost: Ghost) -> None:
         x, y = int(ghost.x), int(ghost.y)
         bob = (
             0
             if ghost.vanishing
-            else int(math.sin(ghost.pulse * 4.0 + ghost.y) * 4)
+            else round(math.sin(ghost.pulse * 1.35 + ghost.y * 0.01) * 2)
         )
         y += bob
         alpha = ghost.alpha
         if ghost.kind is GhostKind.BLINKING and not ghost.vanishing:
             visibility = (math.sin(ghost.pulse * 2.2) + 1.0) / 2.0
             alpha = round(45 + visibility * 210)
-        if self.monster_image:
-            image = self.monster_image.copy()
+        if alpha <= 0:
+            return
+        image = self._ghost_image_for_state(ghost)
+        if image:
+            image = self._prepare_ghost_image(image, ghost)
+            draw_x, draw_y = self._ghost_draw_center(ghost, x, y)
             image.set_alpha(alpha)
-            self.screen.blit(image, image.get_rect(center=(x, y)))
+            self.screen.blit(image, image.get_rect(center=(draw_x, draw_y)))
         else:
             fallback = pygame.Surface((100, 90), pygame.SRCALPHA)
             pygame.draw.circle(fallback, (*PATTERN_COLOR, alpha), (50, 45), 38)
             self.screen.blit(fallback, fallback.get_rect(center=(x, y)))
 
-        if not ghost.vanishing or ghost.removed_pattern:
+        if not ghost.vanishing or ghost.removed_pattern or ghost.removed_forbidden_pattern:
             self._draw_ghost_patterns(ghost, (x, y - 62), alpha)
-        if ghost.resonance_remaining > 0:
-            speed = self.font_small.render(
-                f"x{ghost.RESONANCE_MULTIPLIER:.2g}", True, PATTERN_COLOR
+
+    def _ghost_image_for_state(self, ghost: Ghost) -> pygame.Surface | None:
+        state = "idle"
+        if ghost.vanishing:
+            state = "defeated"
+        elif ghost.is_hit_reacting:
+            state = "attacked"
+        image_key: object = ghost.art_variant
+        if ghost.kind is GhostKind.CREEP:
+            image_key = "creep"
+        elif ghost.kind is GhostKind.CREASE:
+            image_key = "crease"
+        elif ghost.kind is GhostKind.SNARL:
+            image_key = "snarl"
+        variant_images = self.ghost_images.get(image_key)
+        if not variant_images:
+            variant_images = self.ghost_images.get(1) or self.ghost_images.get(2)
+        if not variant_images:
+            return None
+        return (
+            variant_images.get(state)
+            or variant_images.get("idle")
+            or next(iter(variant_images.values()))
+        )
+
+    def _prepare_ghost_image(
+        self, image: pygame.Surface, ghost: Ghost
+    ) -> pygame.Surface:
+        prepared = image.copy()
+        if not ghost.facing_right:
+            prepared = pygame.transform.flip(prepared, True, False)
+        if ghost.vanishing:
+            progress = 1.0 - ghost.fade_remaining / ghost.fade_duration
+            stretch = 1.0 + 0.38 * progress
+            prepared = pygame.transform.smoothscale(
+                prepared,
+                (
+                    prepared.get_width(),
+                    max(1, round(prepared.get_height() * stretch)),
+                ),
             )
-            self.screen.blit(speed, speed.get_rect(center=(x, y + 60)))
+        elif ghost.is_hit_reacting:
+            impulse = self._ghost_hit_reaction_amount(ghost)
+            angle = 8.0 * impulse * (1 if ghost.facing_right else -1)
+            prepared = pygame.transform.rotate(prepared, angle)
+        return prepared
+
+    def _ghost_draw_center(
+        self, ghost: Ghost, x: int, y: int
+    ) -> tuple[float, float]:
+        if not ghost.is_hit_reacting:
+            return x, y
+        dx = ghost.x - ghost.target_x
+        dy = ghost.y - ghost.target_y
+        length = math.hypot(dx, dy) or 1.0
+        impulse = self._ghost_hit_reaction_amount(ghost)
+        offset = ghost.hit_reaction_distance * impulse
+        return (
+            x + dx / length * offset,
+            y + dy / length * offset,
+        )
+
+    def _ghost_hit_reaction_amount(self, ghost: Ghost) -> float:
+        progress = ghost.hit_reaction_progress
+        push_end = 0.22
+        settle_start = 0.78
+        if progress < push_end:
+            return self._smootherstep(progress / push_end)
+        if progress < settle_start:
+            return 1.0 - 0.82 * self._smootherstep(
+                (progress - push_end) / (settle_start - push_end)
+            )
+        return 0.18 * (
+            1.0 - self._smootherstep((progress - settle_start) / (1.0 - settle_start))
+        )
+
+    def _smootherstep(self, value: float) -> float:
+        value = max(0.0, min(1.0, value))
+        return value * value * value * (value * (value * 6.0 - 15.0) + 10.0)
 
     def _draw_ghost_patterns(
         self, ghost: Ghost, center: tuple[int, int], opacity: int
@@ -469,7 +672,12 @@ class ExorcismGame:
         transition = ghost.pattern_transition_progress
         easing = 1.0 - (1.0 - transition) ** 3
         forbidden_count = (
-            1 if ghost.kind is GhostKind.FORBIDDEN and ghost.forbidden_patterns else 0
+            1
+            if (
+                ghost.kind is GhostKind.FORBIDDEN
+                and (ghost.forbidden_patterns or ghost.removed_forbidden_pattern)
+            )
+            else 0
         )
         old_count = max(
             ghost.pattern_transition_from_count,
@@ -535,7 +743,20 @@ class ExorcismGame:
                     )
                 )
 
-        if forbidden_count:
+        if ghost.removed_forbidden_pattern:
+            insert_index = min(1, len(ghost.remaining_patterns))
+            forbidden_x = layout_start(len(ghost.remaining_patterns)) + insert_index * 54 + 27
+            entries.append(
+                (
+                    ghost.removed_forbidden_pattern,
+                    RED,
+                    (forbidden_x, center[1]),
+                    1.0 - transition,
+                    False,
+                )
+            )
+
+        if ghost.kind is GhostKind.FORBIDDEN and ghost.forbidden_patterns:
             insert_index = min(1, len(ghost.remaining_patterns))
             forbidden_x = layout_start(len(ghost.remaining_patterns)) + insert_index * 54 + 27
             entries.append(
@@ -549,16 +770,19 @@ class ExorcismGame:
             )
 
         for pattern, color, pattern_center, entry_alpha, is_first_required in entries:
+            crease_axis = self._crease_axis_for_pattern(ghost, pattern)
+            display_pattern = self._display_pattern_for_ghost(
+                ghost, pattern, crease_axis
+            )
+            wave_strength = 1.0 if ghost.kind is GhostKind.WAVY else 0.0
             nodes = [
                 (
-                    pattern_center[0] + (node % 3 - 1) * 11,
+                    pattern_center[0]
+                    + (node % 3 - 1) * 11
+                    + math.sin(ghost.pulse * 4.6 + node * 1.35) * 3.0 * wave_strength,
                     pattern_center[1]
                     + (node // 3 - 1) * 11
-                    + (
-                        math.sin(ghost.pulse * 3.0 + node * 0.9) * 3
-                        if ghost.kind is GhostKind.WAVY
-                        else 0
-                    ),
+                    + math.sin(ghost.pulse * 5.2 + node * 0.95) * 6.0 * wave_strength,
                 )
                 for node in range(9)
             ]
@@ -589,9 +813,19 @@ class ExorcismGame:
                 (frame_rect.right - 3, pattern_center[1]),
                 1,
             )
-            segments = list(zip(pattern, pattern[1:]))
-            segment_groups: list[tuple[list[tuple[int, int]], float]]
-            if ghost.kind is GhostKind.PARTIAL and is_first_required:
+            pattern_layers = (
+                display_pattern
+                if display_pattern and isinstance(display_pattern[0], tuple)
+                else (display_pattern,)
+            )
+            segment_groups: list[tuple[list[tuple[int, int]], float, tuple[int, int, int]]]
+            if len(pattern_layers) == 2:
+                segment_groups = [
+                    (list(zip(pattern_layers[0], pattern_layers[0][1:])), 0.95, CYAN),
+                    (list(zip(pattern_layers[1], pattern_layers[1][1:])), 0.95, GOLD),
+                ]
+            elif ghost.kind is GhostKind.PARTIAL and is_first_required:
+                segments = list(zip(display_pattern, display_pattern[1:]))
                 blend = (math.sin(ghost.pulse * 1.8) + 1.0) / 2.0
                 segment_groups = [
                     (
@@ -601,6 +835,7 @@ class ExorcismGame:
                             if index % 2 == 0
                         ],
                         0.12 + 0.88 * (1.0 - blend),
+                        color,
                     ),
                     (
                         [
@@ -609,38 +844,107 @@ class ExorcismGame:
                             if index % 2 == 1
                         ],
                         0.12 + 0.88 * blend,
+                        color,
                     ),
                 ]
             else:
-                segment_groups = [(segments, 1.0)]
-            for group, group_alpha in segment_groups:
+                segments = list(zip(display_pattern, display_pattern[1:]))
+                segment_groups = [(segments, 1.0, color)]
+            if crease_axis:
+                self._draw_crease_axis(layer, frame_rect, crease_axis, color, entry_alpha)
+            for group, group_alpha, group_color in segment_groups:
                 visible_nodes: set[int] = set()
                 draw_alpha = round(255 * entry_alpha * group_alpha)
                 for first, second in group:
                     visible_nodes.update((first, second))
                     pygame.draw.line(
                         layer,
-                        (*color, draw_alpha),
+                        (*group_color, draw_alpha),
                         nodes[first],
                         nodes[second],
                         6,
                     )
                     pygame.draw.circle(
-                        layer, (*color, draw_alpha), nodes[first], 3
+                        layer, (*group_color, draw_alpha), nodes[first], 3
                     )
                     pygame.draw.circle(
-                        layer, (*color, draw_alpha), nodes[second], 3
+                        layer, (*group_color, draw_alpha), nodes[second], 3
                     )
-            if ghost.strict_start and pattern and is_first_required:
+            if ghost.strict_start and display_pattern and is_first_required:
                 pygame.draw.circle(
                     layer,
                     (*color, round(255 * entry_alpha)),
-                    nodes[pattern[0]],
+                    nodes[display_pattern[0]],
                     8,
                     2,
                 )
         layer.set_alpha(opacity)
         self.screen.blit(layer, (0, 0))
+
+    def _display_pattern_for_ghost(
+        self, ghost: Ghost, pattern: object, crease_axis: str
+    ) -> object:
+        if (
+            ghost.kind is GhostKind.CREASE
+            and crease_axis
+            and pattern
+            and not isinstance(pattern[0], tuple)
+        ):
+            return mirrored_pattern(pattern, crease_axis)
+        return pattern
+
+    def _crease_axis_for_pattern(self, ghost: Ghost, pattern: object) -> str:
+        if ghost.kind is not GhostKind.CREASE or not ghost.crease_axes:
+            return ""
+        try:
+            index = ghost.remaining_patterns.index(pattern)
+        except ValueError:
+            return ""
+        if index >= len(ghost.crease_axes):
+            return ""
+        return ghost.crease_axes[index]
+
+    def _draw_crease_axis(
+        self,
+        surface: pygame.Surface,
+        rect: pygame.Rect,
+        axis: str,
+        color: tuple[int, int, int],
+        alpha: float,
+    ) -> None:
+        if axis == "x":
+            lines = [((rect.left + 1, rect.centery), (rect.right - 1, rect.centery), GOLD)]
+        elif axis == "y":
+            lines = [((rect.centerx, rect.top + 1), (rect.centerx, rect.bottom - 1), GOLD)]
+        else:
+            lines = [((rect.left + 2, rect.bottom - 2), (rect.right - 2, rect.top + 2), GOLD)]
+        for start, end, line_color in lines:
+            dx = end[0] - start[0]
+            dy = end[1] - start[1]
+            length = max(1.0, math.hypot(dx, dy))
+            step = 7
+            dash = 4
+            count = int(length // step) + 1
+            for index in range(count):
+                a = min(length, index * step)
+                b = min(length, a + dash)
+                if a >= length:
+                    break
+                start_point = (
+                    start[0] + dx * a / length,
+                    start[1] + dy * a / length,
+                )
+                end_point = (
+                    start[0] + dx * b / length,
+                    start[1] + dy * b / length,
+                )
+                pygame.draw.line(
+                    surface,
+                    (*line_color, round(255 * alpha)),
+                    start_point,
+                    end_point,
+                    2,
+                )
 
     def _draw_hud(self) -> None:
         hud = pygame.Surface((710, 84), pygame.SRCALPHA)
@@ -740,6 +1044,30 @@ class ExorcismGame:
                 spell_color,
                 show_start=False,
             )
+            self._draw_spell_cooldown_gauge(
+                spell,
+                pygame.Rect(panel_rect.x + 218, row_y + 13, 54, 54),
+                spell_color,
+            )
+
+    def _draw_spell_cooldown_gauge(
+        self,
+        spell: SpellDefinition,
+        rect: pygame.Rect,
+        color: tuple[int, int, int],
+    ) -> None:
+        progress = self.session.spells.cooldown_progress(spell)
+        gauge = pygame.Surface(rect.size, pygame.SRCALPHA)
+        pygame.draw.rect(gauge, (9, 10, 22, 110), gauge.get_rect(), border_radius=6)
+        fill_height = round(rect.height * progress)
+        if fill_height > 0:
+            fill_rect = pygame.Rect(0, rect.height - fill_height, rect.width, fill_height)
+            pygame.draw.rect(gauge, (*color, 72), fill_rect, border_radius=6)
+        if progress < 1.0:
+            veil_height = rect.height - fill_height
+            pygame.draw.rect(gauge, (0, 0, 0, 105), (0, 0, rect.width, veil_height), border_radius=6)
+        pygame.draw.rect(gauge, (*color, 150), gauge.get_rect(), 2, border_radius=6)
+        self.screen.blit(gauge, rect)
 
     def _draw_reward_orbs(self) -> None:
         target = (365.0, 77.0)
@@ -764,9 +1092,24 @@ class ExorcismGame:
         selected = self.pattern_input.nodes
         dragging = self.pattern_input.dragging
         layer = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        for first, second in zip(self.pending_shift_pattern, self.pending_shift_pattern[1:]):
+            self._draw_neon_line(
+                layer,
+                self.node_positions[first],
+                self.node_positions[second],
+                190,
+                GOLD,
+            )
+        for node in self.pending_shift_pattern:
+            pygame.draw.circle(layer, (*GOLD, 220), self.node_positions[node], 8)
+        line_color = GOLD if self.input_shift_layer and not self.input_shift_cancelled else CYAN
         for first, second in zip(selected, selected[1:]):
             self._draw_neon_line(
-                layer, self.node_positions[first], self.node_positions[second], 255
+                layer,
+                self.node_positions[first],
+                self.node_positions[second],
+                255,
+                line_color,
             )
         if dragging and selected:
             start = self.node_positions[selected[-1]]
@@ -786,6 +1129,7 @@ class ExorcismGame:
                 start,
                 end,
                 180,
+                line_color,
             )
 
         for index, position in enumerate(self.node_positions):
@@ -797,13 +1141,13 @@ class ExorcismGame:
             )
             pygame.draw.circle(
                 layer,
-                (*CYAN, 255) if active else (132, 125, 166, border_alpha),
+                (*line_color, 255) if active else (132, 125, 166, border_alpha),
                 position,
                 NODE_RADIUS,
                 4,
             )
             if active:
-                pygame.draw.circle(layer, (*CYAN, 235), position, 7)
+                pygame.draw.circle(layer, (*line_color, 235), position, 7)
         if self.success_timer > 0 and self.success_pattern:
             progress = 1.0 - self.success_timer / self.success_duration
             self._draw_success_path(layer, self.success_pattern, progress)
@@ -815,13 +1159,14 @@ class ExorcismGame:
         start: tuple[float, float],
         end: tuple[float, float],
         alpha: int,
+        color: tuple[int, int, int] = CYAN,
     ) -> None:
-        pygame.draw.line(surface, (*CYAN, alpha // 5), start, end, 22)
-        pygame.draw.line(surface, (*CYAN, alpha // 2), start, end, 12)
+        pygame.draw.line(surface, (*color, alpha // 5), start, end, 22)
+        pygame.draw.line(surface, (*color, alpha // 2), start, end, 12)
         pygame.draw.line(surface, (225, 255, 255, alpha), start, end, 5)
         for point in (start, end):
-            pygame.draw.circle(surface, (*CYAN, alpha // 5), point, 11)
-            pygame.draw.circle(surface, (*CYAN, alpha // 2), point, 6)
+            pygame.draw.circle(surface, (*color, alpha // 5), point, 11)
+            pygame.draw.circle(surface, (*color, alpha // 2), point, 6)
             pygame.draw.circle(surface, (225, 255, 255, alpha), point, 3)
 
     def _draw_success_path(

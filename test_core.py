@@ -10,6 +10,8 @@ from core import (
     PatternResult,
     SpellManager,
     SpellType,
+    mirrored_pattern,
+    pattern_attempt_matches,
 )
 
 
@@ -102,6 +104,9 @@ class GameSessionTests(unittest.TestCase):
             self.forbidden.resonance_remaining,
             self.forbidden.RESONANCE_DURATION,
         )
+        self.assertEqual(self.forbidden.forbidden_patterns, [])
+        self.assertEqual(self.forbidden.removed_forbidden_pattern, forbidden_pattern)
+        self.assertEqual(self.forbidden.pattern_transition_progress, 0.0)
         self.assertEqual(self.session.health, 5)
 
     def test_forbidden_pattern_accelerates_trap_ghost(self) -> None:
@@ -114,6 +119,7 @@ class GameSessionTests(unittest.TestCase):
             self.forbidden.resonance_remaining,
             self.forbidden.RESONANCE_DURATION,
         )
+        self.assertEqual(self.forbidden.forbidden_patterns, [])
         self.assertEqual(self.session.health, 5)
 
     def test_forbidden_acceleration_expires(self) -> None:
@@ -158,6 +164,28 @@ class GameSessionTests(unittest.TestCase):
         self.assertEqual(result, PatternResult.MISSED)
         self.assertFalse(locked.vanishing)
 
+    def test_start_locked_can_apply_to_multiple_patterns_without_changing_them(self) -> None:
+        locked = Ghost(
+            GHOST_SPECS[0],
+            700,
+            200,
+            400,
+            300,
+            remaining_patterns=[(0, 1, 2), (3, 4, 5)],
+            kind=GhostKind.START_LOCKED,
+        )
+        self.session.ghosts = [locked]
+
+        result = self.session.judge_pattern((0, 1, 2))
+
+        self.assertEqual(result, PatternResult.HIT)
+        self.assertEqual(locked.kind, GhostKind.START_LOCKED)
+        self.assertEqual(locked.remaining_patterns, [(3, 4, 5)])
+        result = self.session.judge_pattern((5, 4, 3))
+        self.assertEqual(result, PatternResult.MISSED)
+        result = self.session.judge_pattern((3, 4, 5))
+        self.assertEqual(result, PatternResult.HIT)
+
     def test_heal_consumes_power_and_restores_health(self) -> None:
         self.session.health = 2
         self.session.spells.holy_power = SpellManager.HEAL_COST
@@ -195,15 +223,11 @@ class GameSessionTests(unittest.TestCase):
         self.assertEqual(result, PatternResult.MISSED)
         self.assertEqual(self.session.health, 5)
 
-    def test_ghost_pauses_then_eases_toward_player(self) -> None:
+    def test_ghost_eases_toward_player_smoothly(self) -> None:
         ghost = Ghost(GHOST_SPECS[0], 100, 100, 400, 400)
         before = ghost.distance_to((400, 400))
 
         ghost.update(0.4)
-
-        self.assertEqual((ghost.x, ghost.y), (100, 100))
-
-        ghost.update(0.55)
 
         self.assertGreater(ghost.x, 100)
         self.assertGreater(ghost.y, 100)
@@ -339,6 +363,24 @@ class GameSessionTests(unittest.TestCase):
         ghost.update(ghost.pattern_transition_duration)
         self.assertEqual(ghost.removed_pattern, ())
 
+    def test_pattern_removal_starts_hit_reaction(self) -> None:
+        ghost = Ghost(
+            GHOST_SPECS[0],
+            700,
+            200,
+            400,
+            300,
+            remaining_patterns=[(0, 1, 2), (3, 4, 5)],
+        )
+
+        self.assertFalse(ghost.is_hit_reacting)
+        ghost.remove_first_pattern()
+
+        self.assertTrue(ghost.is_hit_reacting)
+        self.assertEqual(ghost.hit_reaction_progress, 0.0)
+        ghost.update(ghost.hit_reaction_duration)
+        self.assertFalse(ghost.is_hit_reacting)
+
     def test_spawn_fades_in(self) -> None:
         ghost = Ghost(GHOST_SPECS[0], 700, 200, 400, 300)
 
@@ -363,9 +405,28 @@ class GameSessionTests(unittest.TestCase):
 
         self.assertEqual(result, PatternResult.SPELL)
         self.assertTrue(self.normal.knockback_active)
+        self.assertEqual(
+            self.normal.slow_remaining,
+            SpellManager.REPEL_SLOW_DURATION,
+        )
         self.assertEqual(self.normal.distance_to((400, 300)), before)
         self.normal.update(self.normal.knockback_duration)
         self.assertGreater(self.normal.distance_to((400, 300)), before)
+
+    def test_spell_cooldown_blocks_repeat_cast_until_updated(self) -> None:
+        spell = next(
+            spell
+            for spell in SpellManager.SPELLS
+            if spell.spell_type is SpellType.REPEL
+        )
+        self.session.ghosts = [self.normal]
+        self.session.spells.holy_power = spell.cost * 2
+
+        self.assertEqual(self.session.judge_pattern(spell.pattern), PatternResult.SPELL)
+        self.assertEqual(self.session.judge_pattern(spell.pattern), PatternResult.MISSED)
+        self.session.update_ghosts(spell.cooldown, (400, 300), 20)
+
+        self.assertEqual(self.session.judge_pattern(spell.pattern), PatternResult.SPELL)
 
     def test_repel_moves_smoothly_before_reaching_destination(self) -> None:
         before = (self.normal.x, self.normal.y)
@@ -380,13 +441,13 @@ class GameSessionTests(unittest.TestCase):
             (self.normal.knockback_end_x, self.normal.knockback_end_y),
         )
 
-    def test_nullify_only_removes_nearby_gimmicks(self) -> None:
+    def test_nullify_removes_all_active_gimmicks(self) -> None:
         spell = next(
             spell
             for spell in SpellManager.SPELLS
             if spell.spell_type is SpellType.NULLIFY
         )
-        near = Ghost(
+        forbidden = Ghost(
             GHOST_SPECS[0],
             450,
             300,
@@ -395,7 +456,7 @@ class GameSessionTests(unittest.TestCase):
             kind=GhostKind.FORBIDDEN,
             forbidden_patterns=[(0, 1, 2)],
         )
-        far = Ghost(
+        wavy = Ghost(
             GHOST_SPECS[0],
             900,
             300,
@@ -403,32 +464,210 @@ class GameSessionTests(unittest.TestCase):
             300,
             kind=GhostKind.WAVY,
         )
-        self.session.ghosts = [near, far]
+        locked = Ghost(
+            GHOST_SPECS[0],
+            300,
+            300,
+            400,
+            300,
+            kind=GhostKind.START_LOCKED,
+        )
+        self.session.ghosts = [forbidden, wavy, locked]
         self.session.spells.holy_power = spell.cost
 
         self.session.judge_pattern(spell.pattern)
 
-        self.assertEqual(near.kind, GhostKind.SLOWPOKE)
-        self.assertEqual(near.forbidden_patterns, [])
-        self.assertEqual(far.kind, GhostKind.WAVY)
+        self.assertEqual(forbidden.kind, GhostKind.SLOWPOKE)
+        self.assertEqual(forbidden.forbidden_patterns, [])
+        self.assertEqual(wavy.kind, GhostKind.SLOWPOKE)
+        self.assertEqual(locked.kind, GhostKind.SLOWPOKE)
 
-    def test_slow_spell_only_affects_ghosts_present_at_cast_time(self) -> None:
+    def test_spawn_protected_forbidden_ghost_does_not_resonate(self) -> None:
+        ghost = Ghost(
+            GHOST_SPECS[0],
+            800,
+            300,
+            400,
+            300,
+            remaining_patterns=[(3, 4, 5)],
+            kind=GhostKind.FORBIDDEN,
+            forbidden_patterns=[(0, 1, 2)],
+            spawn_protected=True,
+        )
+        self.session.ghosts = [ghost]
+
+        result = self.session.judge_pattern((0, 1, 2))
+
+        self.assertEqual(result, PatternResult.MISSED)
+        self.assertEqual(ghost.resonance_remaining, 0.0)
+
+    def test_spawned_ghost_moves_while_fading_in(self) -> None:
+        self.session.spawn_queue.append(GHOST_SPECS[0])
+        ghost = self.session.spawn_next(((800.0, 300.0),), (400, 300))
+        self.assertIsNotNone(ghost)
+        before = ghost.distance_to((400, 300))
+
+        ghost.update(ghost.spawn_duration / 2)
+
+        self.assertGreater(ghost.alpha, 0)
+        self.assertLess(ghost.distance_to((400, 300)), before)
+
+    def test_layered_patterns_match_by_combined_layers(self) -> None:
+        expected = ((0, 1, 2), (6, 7, 8))
+
+        self.assertTrue(pattern_attempt_matches(((6, 7, 8), (0, 1, 2)), expected))
+        self.assertFalse(pattern_attempt_matches((0, 1, 2, 6, 7, 8), expected))
+
+    def test_mirrored_pattern_transforms_grid_axes(self) -> None:
+        self.assertEqual(mirrored_pattern((0, 1, 2), "x"), (6, 7, 8))
+        self.assertEqual(mirrored_pattern((0, 3, 6), "y"), (2, 5, 8))
+        self.assertEqual(mirrored_pattern((0, 1, 4), "origin"), (8, 7, 4))
+
+    def test_hidden_creep_ignores_patterns_until_reappearing(self) -> None:
+        creep = Ghost(
+            GHOST_SPECS[0],
+            700,
+            300,
+            400,
+            300,
+            remaining_patterns=[(0, 1, 2), (3, 4, 5)],
+            kind=GhostKind.CREEP,
+        )
+        self.session.ghosts = [creep]
+
+        self.session.judge_pattern((0, 1, 2))
+        hidden_position = (creep.x, creep.y)
+        result = self.session.judge_pattern((3, 4, 5))
+
+        self.assertEqual(result, PatternResult.MISSED)
+        self.assertGreaterEqual(creep.hidden_remaining, creep.hidden_duration_min)
+        self.assertGreaterEqual(creep.hidden_remaining, 5.0)
+        self.assertLessEqual(creep.hidden_remaining, creep.hidden_duration_max)
+        self.assertEqual(creep.remaining_patterns, [(3, 4, 5)])
+        self.assertEqual((creep.x, creep.y), hidden_position)
+        creep.update(creep.hidden_duration)
+        self.assertGreater(creep.resonance_remaining, 0.0)
+        result = self.session.judge_pattern((3, 4, 5))
+        self.assertEqual(result, PatternResult.MISSED)
+        creep.update(creep.reappear_duration)
+        result = self.session.judge_pattern((3, 4, 5))
+        self.assertEqual(result, PatternResult.HIT)
+
+    def test_creep_reappears_in_clear_position(self) -> None:
+        creep = Ghost(
+            GHOST_SPECS[0],
+            700,
+            300,
+            400,
+            300,
+            remaining_patterns=[(0, 1, 2), (3, 4, 5)],
+            kind=GhostKind.CREEP,
+        )
+        blocker = Ghost(GHOST_SPECS[0], 605, 300, 400, 300)
+        self.session.ghosts = [creep, blocker]
+
+        self.session.judge_pattern((0, 1, 2))
+        creep.update(creep.hidden_duration)
+
+        self.assertGreaterEqual(
+            creep.distance_to((blocker.x, blocker.y)),
+            self.session.SPAWN_CLEARANCE,
+        )
+
+    def test_crease_requires_the_mirrored_pattern(self) -> None:
+        source = (0, 1, 4)
+        mirrored = mirrored_pattern(source, "y")
+        crease = Ghost(
+            GHOST_SPECS[0],
+            700,
+            300,
+            400,
+            300,
+            remaining_patterns=[mirrored],
+            kind=GhostKind.CREASE,
+            crease_axis="y",
+            crease_source_pattern=source,
+        )
+        self.session.ghosts = [crease]
+
+        self.assertEqual(self.session.judge_pattern(source), PatternResult.MISSED)
+        self.assertEqual(self.session.judge_pattern(mirrored), PatternResult.HIT)
+
+    def test_crease_axes_stay_attached_to_their_original_patterns(self) -> None:
+        first_source = (0, 1, 4)
+        second_source = (3, 4, 5)
+        first = mirrored_pattern(first_source, "y")
+        second = mirrored_pattern(second_source, "x")
+        crease = Ghost(
+            GHOST_SPECS[0],
+            700,
+            300,
+            400,
+            300,
+            remaining_patterns=[first, second],
+            kind=GhostKind.CREASE,
+            crease_axis="y",
+            crease_source_pattern=first_source,
+            crease_target_pattern=first,
+            crease_axes=["y", "x"],
+        )
+        self.session.ghosts = [crease]
+
+        self.assertEqual(self.session.judge_pattern(first), PatternResult.HIT)
+
+        self.assertEqual(crease.remaining_patterns, [second])
+        self.assertEqual(crease.crease_axes, ["x"])
+        self.assertEqual(self.session.judge_pattern(second), PatternResult.HIT)
+
+    def test_creep_spawns_with_at_least_two_patterns(self) -> None:
+        found = None
+        self.session.wave = 2
+        for _ in range(300):
+            self.session.spawn_queue.append(GHOST_SPECS[0])
+            ghost = self.session.spawn_next(((800.0, 300.0),), (400, 300))
+            if ghost.kind is GhostKind.CREEP:
+                found = ghost
+                break
+            self.session.ghosts.clear()
+
+        self.assertIsNotNone(found)
+        self.assertGreaterEqual(len(found.remaining_patterns), 2)
+
+    def test_truth_spell_reveals_creeps_and_clears_forbidden_gimmick(self) -> None:
         spell = next(
             spell
             for spell in SpellManager.SPELLS
-            if spell.spell_type is SpellType.SLOW
+            if spell.spell_type is SpellType.TRUTH
         )
-        self.session.ghosts = [self.normal]
+        creep = Ghost(
+            GHOST_SPECS[0],
+            700,
+            300,
+            400,
+            300,
+            remaining_patterns=[(0, 1, 2), (3, 4, 5)],
+            kind=GhostKind.CREEP,
+        )
+        forbidden = Ghost(
+            GHOST_SPECS[0],
+            500,
+            300,
+            400,
+            300,
+            kind=GhostKind.FORBIDDEN,
+            forbidden_patterns=[(0, 1, 2)],
+        )
+        creep.hide_and_reappear_at((650, 300))
+        self.session.ghosts = [creep, forbidden]
         self.session.spells.holy_power = spell.cost
 
         self.session.judge_pattern(spell.pattern)
-        later = Ghost(GHOST_SPECS[0], 900, 300, 400, 300)
-        self.session.ghosts.append(later)
 
-        self.assertEqual(
-            self.normal.slow_remaining, SpellManager.SLOW_DURATION
-        )
-        self.assertEqual(later.slow_remaining, 0.0)
+        self.assertEqual(creep.hidden_remaining, 0.0)
+        self.assertGreater(creep.reappear_remaining, 0.0)
+        self.assertEqual(creep.resonance_remaining, 0.0)
+        self.assertEqual(forbidden.kind, GhostKind.SLOWPOKE)
+        self.assertEqual(forbidden.forbidden_patterns, [])
 
 
 if __name__ == "__main__":

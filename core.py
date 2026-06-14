@@ -5,10 +5,11 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 import math
 import random
-from typing import Deque, Iterable, Optional, Sequence
+from typing import Deque, Iterable, Optional, Sequence, TypeAlias
 
 
 Pattern = tuple[int, ...]
+PatternAttempt: TypeAlias = Pattern | tuple[Pattern, Pattern]
 PATTERN_POOL: tuple[Pattern, ...] = (
     (0, 1, 2),
     (0, 3, 6),
@@ -22,6 +23,50 @@ PATTERN_POOL: tuple[Pattern, ...] = (
     (2, 1, 4, 7),
     (0, 3, 4, 5),
     (6, 3, 4, 2),
+    (0, 1, 4),
+    (2, 1, 4),
+    (6, 3, 4),
+    (8, 5, 4),
+    (0, 4, 5),
+    (2, 4, 3),
+    (6, 4, 1),
+    (8, 4, 7),
+    (0, 1, 5),
+    (2, 1, 3),
+    (6, 7, 5),
+    (8, 7, 3),
+    (0, 4, 7),
+    (2, 4, 7),
+    (6, 4, 5),
+    (8, 4, 3),
+    (0, 3, 4, 1),
+    (2, 5, 4, 1),
+    (6, 3, 4, 7),
+    (8, 5, 4, 7),
+)
+COMPLEX_PATTERN_POOL: tuple[Pattern, ...] = (
+    (0, 1, 2, 5, 4, 3, 6, 7, 8),
+    (0, 3, 6, 7, 4, 1, 2, 5, 8),
+    (2, 1, 0, 3, 4, 5, 8, 7, 6),
+    (6, 3, 0, 1, 4, 7, 8, 5, 2),
+    (0, 4, 2, 5, 8, 7, 3),
+    (2, 4, 0, 3, 6, 7, 5),
+    (6, 4, 8, 5, 2, 1, 3),
+    (8, 4, 6, 3, 0, 1, 5),
+    (1, 0, 3, 4, 5, 8, 7),
+    (3, 0, 1, 4, 7, 8, 5),
+    (5, 2, 1, 4, 3, 6, 7),
+    (7, 6, 3, 4, 1, 2, 5),
+    (0, 4, 1, 2, 5, 8),
+    (2, 4, 5, 8, 7, 6),
+    (6, 4, 3, 0, 1, 2),
+    (8, 4, 7, 6, 3, 0),
+)
+LAYERED_PATTERN_POOL: tuple[tuple[Pattern, Pattern], ...] = (
+    ((0, 1, 2), (6, 7, 8)),
+    ((0, 3, 6), (2, 5, 8)),
+    ((0, 4, 8), (2, 4, 6)),
+    ((1, 4, 7), (3, 4, 5)),
 )
 
 
@@ -40,13 +85,16 @@ class GhostKind(Enum):
     WAVY = auto()
     FORBIDDEN = auto()
     PARTIAL = auto()
+    CREEP = auto()
+    CREASE = auto()
+    SNARL = auto()
 
 
 class SpellType(Enum):
     HEAL = auto()
     REPEL = auto()
     NULLIFY = auto()
-    SLOW = auto()
+    TRUTH = auto()
 
 
 @dataclass(frozen=True)
@@ -56,12 +104,55 @@ class SpellDefinition:
     pattern: Pattern
     cost: int
     description: str
+    cooldown: float
+
+
+def pattern_edges(pattern: Pattern) -> frozenset[tuple[int, int]]:
+    return frozenset(
+        tuple(sorted((first, second)))
+        for first, second in zip(pattern, pattern[1:])
+    )
+
+
+def layered_pattern_signature(layers: tuple[Pattern, Pattern]) -> tuple[frozenset[int], frozenset[tuple[int, int]]]:
+    nodes = frozenset(node for layer in layers for node in layer)
+    edges = frozenset(edge for layer in layers for edge in pattern_edges(layer))
+    return nodes, edges
 
 
 def patterns_match(entered: Pattern, expected: Pattern, strict_start: bool = False) -> bool:
     if entered == expected:
         return True
     return not strict_start and entered == tuple(reversed(expected))
+
+
+def pattern_attempt_matches(
+    entered: PatternAttempt,
+    expected: PatternAttempt,
+    strict_start: bool = False,
+) -> bool:
+    if isinstance(expected[0], tuple):
+        if not isinstance(entered[0], tuple):
+            return False
+        return layered_pattern_signature(entered) == layered_pattern_signature(expected)
+    if isinstance(entered[0], tuple):
+        return False
+    return patterns_match(entered, expected, strict_start)
+
+
+def mirrored_pattern(pattern: Pattern, axis: str) -> Pattern:
+    def mirror_node(node: int) -> int:
+        row, col = divmod(node, 3)
+        if axis == "x":
+            row = 2 - row
+        elif axis == "y":
+            col = 2 - col
+        elif axis == "origin":
+            row = 2 - row
+            col = 2 - col
+        return row * 3 + col
+
+    return tuple(mirror_node(node) for node in pattern)
 
 
 @dataclass(frozen=True)
@@ -86,14 +177,14 @@ class Ghost:
     target_y: float = 0.0
     radius: int = 32
     pulse: float = 0.0
-    remaining_patterns: list[Pattern] = field(default_factory=list)
+    remaining_patterns: list[PatternAttempt] = field(default_factory=list)
     vanishing: bool = False
     fade_remaining: float = 0.0
     fade_duration: float = 0.85
     movement_phase: str = "pause"
     movement_elapsed: float = 0.0
-    movement_pause: float = 0.85
-    movement_duration: float = 1.1
+    movement_pause: float = 0.18
+    movement_duration: float = 2.25
     step_start_x: float = 0.0
     step_start_y: float = 0.0
     step_end_x: float = 0.0
@@ -102,9 +193,11 @@ class Ghost:
     forbidden_patterns: list[Pattern] = field(default_factory=list)
     spawn_elapsed: float = 0.0
     spawn_duration: float = 0.7
+    spawn_protected: bool = False
     slow_remaining: float = 0.0
     resonance_remaining: float = 0.0
     removed_pattern: Pattern = ()
+    removed_forbidden_pattern: Pattern = ()
     pattern_transition_elapsed: float = 0.0
     pattern_transition_duration: float = 0.55
     pattern_transition_from_count: int = 0
@@ -115,14 +208,36 @@ class Ghost:
     knockback_end_x: float = 0.0
     knockback_end_y: float = 0.0
     knockback_active: bool = False
+    art_variant: int = 1
+    hit_reaction_elapsed: float = 0.0
+    hit_reaction_duration: float = 0.72
+    hit_reaction_distance: float = 22.0
+    hidden_remaining: float = 0.0
+    hidden_duration: float = 5.5
+    hidden_duration_min: float = 5.2
+    hidden_duration_max: float = 7.8
+    reappear_remaining: float = 0.0
+    reappear_duration: float = 0.45
+    pending_reappear_x: float = 0.0
+    pending_reappear_y: float = 0.0
+    crease_axis: str = ""
+    crease_source_pattern: Pattern = ()
+    crease_target_pattern: Pattern = ()
+    crease_axes: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.remaining_patterns:
             self.remaining_patterns = [self.spec.pattern]
+        self.art_variant = 1 if self.art_variant == 1 else 2
+        if not self.removed_pattern:
+            self.hit_reaction_elapsed = self.hit_reaction_duration
 
     @property
     def pattern(self) -> Pattern:
-        return self.remaining_patterns[0] if self.remaining_patterns else ()
+        first = self.remaining_patterns[0] if self.remaining_patterns else ()
+        if not first:
+            return ()
+        return first if isinstance(first[0], int) else first[0]
 
     @property
     def is_resonant(self) -> bool:
@@ -132,10 +247,27 @@ class Ghost:
     def strict_start(self) -> bool:
         return self.kind is GhostKind.START_LOCKED
 
-    def matches_required(self, entered: Pattern) -> bool:
-        return patterns_match(entered, self.pattern, self.strict_start)
+    @property
+    def is_spawned(self) -> bool:
+        return self.spawn_elapsed >= self.spawn_duration
+
+    @property
+    def is_interactive(self) -> bool:
+        return (
+            not self.vanishing
+            and self.hidden_remaining <= 0
+            and self.reappear_remaining <= 0
+            and (not self.spawn_protected or self.is_spawned)
+        )
+
+    def matches_required(self, entered: PatternAttempt) -> bool:
+        if not self.remaining_patterns:
+            return False
+        return pattern_attempt_matches(entered, self.remaining_patterns[0], self.strict_start)
 
     def matches_forbidden(self, entered: Pattern) -> bool:
+        if not isinstance(entered[0], int):
+            return False
         return any(
             patterns_match(entered, forbidden)
             for forbidden in self.forbidden_patterns
@@ -143,6 +275,23 @@ class Ghost:
 
     def update(self, seconds: float) -> None:
         self.spawn_elapsed = min(self.spawn_duration, self.spawn_elapsed + seconds)
+        self.hit_reaction_elapsed = min(
+            self.hit_reaction_duration,
+            self.hit_reaction_elapsed + seconds,
+        )
+        was_hidden = self.hidden_remaining > 0
+        self.hidden_remaining = max(0.0, self.hidden_remaining - seconds)
+        started_reappearing = False
+        if was_hidden and self.hidden_remaining <= 0:
+            self.x = self.pending_reappear_x
+            self.y = self.pending_reappear_y
+            self.reappear_remaining = self.reappear_duration
+            self.resonance_remaining = self.RESONANCE_DURATION
+            self.spawn_elapsed = 0.0
+            self.start_moving_immediately()
+            started_reappearing = True
+        if not started_reappearing:
+            self.reappear_remaining = max(0.0, self.reappear_remaining - seconds)
         if self.pattern_transition_elapsed < self.pattern_transition_duration:
             self.pattern_transition_elapsed = min(
                 self.pattern_transition_duration,
@@ -150,11 +299,13 @@ class Ghost:
             )
             if self.pattern_transition_elapsed >= self.pattern_transition_duration:
                 self.removed_pattern = ()
+                self.removed_forbidden_pattern = ()
         self.slow_remaining = max(0.0, self.slow_remaining - seconds)
-        self.resonance_remaining = max(
-            0.0, self.resonance_remaining - seconds
-        )
-        if self.vanishing:
+        if not started_reappearing:
+            self.resonance_remaining = max(
+                0.0, self.resonance_remaining - seconds
+            )
+        if self.vanishing or self.hidden_remaining > 0:
             self.fade_remaining = max(0.0, self.fade_remaining - seconds)
             self.pulse += seconds
             return
@@ -232,11 +383,24 @@ class Ghost:
         self.step_end_x = self.x + (self.target_x - self.x) / distance * step_distance
         self.step_end_y = self.y + (self.target_y - self.y) / distance * step_distance
 
+    def start_moving_immediately(self) -> None:
+        self.movement_elapsed = 0.0
+        self._begin_movement_step()
+
     def distance_to(self, position: tuple[float, float]) -> float:
         return math.hypot(self.x - position[0], self.y - position[1])
 
     def resonate(self) -> None:
         self.resonance_remaining = self.RESONANCE_DURATION
+
+    def trigger_forbidden_pattern(self, entered: Pattern) -> None:
+        for index, forbidden in enumerate(self.forbidden_patterns):
+            if patterns_match(entered, forbidden):
+                self.removed_forbidden_pattern = self.forbidden_patterns.pop(index)
+                self.pattern_transition_elapsed = 0.0
+                self.pattern_transition_from_count = len(self.remaining_patterns) + 1
+                break
+        self.resonate()
 
     def repel(self, distance: float) -> None:
         dx = self.x - self.target_x
@@ -259,28 +423,71 @@ class Ghost:
             return False
         self.pattern_transition_from_count = len(self.remaining_patterns)
         self.removed_pattern = self.remaining_patterns.pop(0)
+        if self.crease_axes:
+            self.crease_axes.pop(0)
         self.pattern_transition_elapsed = 0.0
+        self.hit_reaction_elapsed = 0.0
         if not self.remaining_patterns:
             self.vanishing = True
             self.fade_remaining = self.fade_duration
         return True
 
+    def hide_and_reappear_at(self, position: tuple[float, float]) -> None:
+        self.pending_reappear_x, self.pending_reappear_y = position
+        self.hidden_remaining = self.hidden_duration
+        self.reappear_remaining = 0.0
+        self.hit_reaction_elapsed = self.hit_reaction_duration
+        self.knockback_active = False
+        self.movement_phase = "pause"
+        self.movement_elapsed = 0.0
+
+    def reveal_now(self, accelerate: bool = False) -> None:
+        if self.hidden_remaining > 0:
+            self.hidden_remaining = 0.0
+            self.x = self.pending_reappear_x
+            self.y = self.pending_reappear_y
+            self.reappear_remaining = self.reappear_duration
+            self.resonance_remaining = (
+                self.RESONANCE_DURATION if accelerate else 0.0
+            )
+            self.spawn_elapsed = 0.0
+            self.start_moving_immediately()
+
     @property
     def alpha(self) -> int:
+        if self.hidden_remaining > 0:
+            return 0
+        reappear_alpha = (
+            1.0 - self.reappear_remaining / self.reappear_duration
+            if self.reappear_remaining > 0
+            else 1.0
+        )
         spawn_alpha = min(1.0, self.spawn_elapsed / self.spawn_duration)
         vanish_alpha = (
             self.fade_remaining / self.fade_duration if self.vanishing else 1.0
         )
-        return round(255 * spawn_alpha * vanish_alpha)
+        return round(255 * spawn_alpha * vanish_alpha * reappear_alpha)
 
     @property
     def pattern_transition_progress(self) -> float:
-        if not self.removed_pattern:
+        if not self.removed_pattern and not self.removed_forbidden_pattern:
             return 1.0
         return min(
             1.0,
             self.pattern_transition_elapsed / self.pattern_transition_duration,
         )
+
+    @property
+    def hit_reaction_progress(self) -> float:
+        return min(1.0, self.hit_reaction_elapsed / self.hit_reaction_duration)
+
+    @property
+    def is_hit_reacting(self) -> bool:
+        return self.hit_reaction_progress < 1.0
+
+    @property
+    def facing_right(self) -> bool:
+        return self.x <= self.target_x
 
 
 class PatternInput:
@@ -314,7 +521,7 @@ class SpellManager:
     REPEL_DISTANCE = 190.0
     REPEL_RADIUS = 330.0
     NULLIFY_RADIUS = 285.0
-    SLOW_DURATION = 9.0
+    REPEL_SLOW_DURATION = 1.0
     SPELLS = (
         SpellDefinition(
             SpellType.HEAL,
@@ -322,27 +529,31 @@ class SpellManager:
             (6, 4, 2, 1, 0, 5, 8),
             40,
             "+2 HP",
+            7.0,
         ),
         SpellDefinition(
             SpellType.REPEL,
             "REPEL",
             (0, 4, 8, 5, 2),
             35,
-            "Push ghosts away",
+            "Push and slow 1s",
+            6.0,
         ),
         SpellDefinition(
             SpellType.NULLIFY,
             "SANCTIFY",
             (0, 1, 4, 7, 8),
             45,
-            "Clear nearby gimmicks",
+            "Clear all gimmicks",
+            10.0,
         ),
         SpellDefinition(
-            SpellType.SLOW,
-            "SLOW",
+            SpellType.TRUTH,
+            "TRUTH",
             (2, 1, 4, 3, 6),
             45,
-            "Slow current ghosts 9s",
+            "Reveal creeps / clear traps",
+            12.0,
         ),
     )
     HEAL_PATTERN = SPELLS[0].pattern
@@ -350,6 +561,9 @@ class SpellManager:
 
     def __init__(self) -> None:
         self.holy_power = 0
+        self.cooldowns: dict[SpellType, float] = {
+            spell.spell_type: 0.0 for spell in self.SPELLS
+        }
 
     def gain(self, amount: int) -> None:
         self.holy_power = min(self.MAX_POWER, self.holy_power + amount)
@@ -368,10 +582,24 @@ class SpellManager:
         )
 
     def can_cast(self, spell: SpellDefinition) -> bool:
-        return self.holy_power >= spell.cost
+        return (
+            self.holy_power >= spell.cost
+            and self.cooldowns.get(spell.spell_type, 0.0) <= 0
+        )
 
     def spend(self, spell: SpellDefinition) -> None:
         self.holy_power -= spell.cost
+        self.cooldowns[spell.spell_type] = spell.cooldown
+
+    def update(self, seconds: float) -> None:
+        for spell_type, remaining in list(self.cooldowns.items()):
+            self.cooldowns[spell_type] = max(0.0, remaining - seconds)
+
+    def cooldown_progress(self, spell: SpellDefinition) -> float:
+        remaining = self.cooldowns.get(spell.spell_type, 0.0)
+        if spell.cooldown <= 0:
+            return 1.0
+        return 1.0 - min(1.0, remaining / spell.cooldown)
 
 
 GHOST_SPECS = (
@@ -458,22 +686,51 @@ class GameSession:
             return None
         spec = self.spawn_queue.popleft()
         x, y = self.rng.choice(available_positions)
+        kind_weights = (
+            (36, 4, 6, 16, 4, 3, 8, 15, 8)
+            if self.wave == 1
+            else (23, 6, 8, 16, 8, 5, 11, 16, 7)
+        )
+        kind = self.rng.choices(tuple(GhostKind), weights=kind_weights, k=1)[0]
         pattern_count = self.rng.choices(
             (1, 2, 3), weights=(65, 30, 5), k=1
         )[0]
-        remaining_patterns = self.rng.sample(PATTERN_POOL, k=pattern_count)
-        kind_weights = (
-            (75, 5, 8, 7, 3, 2)
-            if self.wave == 1
-            else (55, 8, 10, 10, 10, 7)
+        if kind is GhostKind.CREEP:
+            pattern_count = max(2, pattern_count)
+        remaining_patterns: list[PatternAttempt] = list(
+            self.rng.sample(PATTERN_POOL, k=pattern_count)
         )
-        kind = self.rng.choices(tuple(GhostKind), weights=kind_weights, k=1)[0]
+        crease_axis = ""
+        crease_source_pattern: Pattern = ()
+        crease_target_pattern: Pattern = ()
+        crease_axes: list[str] = []
+        if kind is GhostKind.CREASE:
+            source_patterns = self.rng.sample(PATTERN_POOL, k=pattern_count)
+            crease_axes = [
+                self.rng.choices(("x", "y", "origin"), weights=(47, 47, 6), k=1)[0]
+                for _ in source_patterns
+            ]
+            crease_axis = crease_axes[0]
+            crease_source_pattern = source_patterns[0]
+            remaining_patterns = [
+                mirrored_pattern(pattern, axis)
+                for pattern, axis in zip(source_patterns, crease_axes)
+            ]
+            crease_target_pattern = remaining_patterns[0]
+        elif kind is GhostKind.SNARL:
+            snarl_count = self.rng.choices((1, 2), weights=(70, 30), k=1)[0]
+            remaining_patterns = []
+            for _ in range(snarl_count):
+                if self.rng.random() < 0.42:
+                    remaining_patterns.append(self.rng.choice(LAYERED_PATTERN_POOL))
+                else:
+                    remaining_patterns.append(self.rng.choice(COMPLEX_PATTERN_POOL))
         forbidden_patterns: list[Pattern] = []
         if kind is GhostKind.FORBIDDEN:
             overlapping = [
                 ghost.pattern
                 for ghost in self.ghosts
-                if not ghost.vanishing and ghost.pattern not in remaining_patterns
+                if ghost.is_interactive and ghost.pattern not in remaining_patterns
             ]
             candidates = overlapping or [
                 pattern
@@ -490,7 +747,14 @@ class GameSession:
             remaining_patterns=remaining_patterns,
             kind=kind,
             forbidden_patterns=forbidden_patterns,
+            art_variant=self.rng.choice((1, 2)),
+            spawn_protected=True,
+            crease_axis=crease_axis,
+            crease_source_pattern=crease_source_pattern,
+            crease_target_pattern=crease_target_pattern,
+            crease_axes=crease_axes,
         )
+        ghost.start_moving_immediately()
         self.ghosts.append(ghost)
         return ghost
 
@@ -508,13 +772,14 @@ class GameSession:
         player_position: tuple[float, float],
         player_radius: float,
     ) -> int:
+        self.spells.update(seconds)
         escaped = 0
         for ghost in list(self.ghosts):
             ghost.update(seconds)
             if ghost.vanishing and ghost.fade_remaining <= 0:
                 self.ghosts.remove(ghost)
             elif (
-                not ghost.vanishing
+                ghost.is_interactive
                 and ghost.distance_to(player_position) <= player_radius + ghost.radius
             ):
                 self.ghosts.remove(ghost)
@@ -527,8 +792,9 @@ class GameSession:
     def damage(self, amount: int = 1) -> None:
         self.health = max(0, self.health - amount)
 
-    def judge_pattern(self, pattern: Iterable[int]) -> PatternResult:
-        entered = tuple(pattern)
+    def judge_pattern(self, pattern: Iterable[int] | tuple[Pattern, Pattern]) -> PatternResult:
+        raw = tuple(pattern)
+        entered: PatternAttempt = raw  # type: ignore[assignment]
         self.last_match_count = 0
         self.last_spell_cast = False
         self.last_spell_type = None
@@ -536,7 +802,7 @@ class GameSession:
         if not entered:
             return PatternResult.EMPTY
 
-        spell = self.spells.matching_spell(entered)
+        spell = None if isinstance(entered[0], tuple) else self.spells.matching_spell(entered)
         if spell is not None:
             if not self.spells.can_cast(spell):
                 self.last_message = ""
@@ -547,7 +813,7 @@ class GameSession:
             self.last_message = ""
             return PatternResult.SPELL
 
-        active_ghosts = [ghost for ghost in self.ghosts if not ghost.vanishing]
+        active_ghosts = [ghost for ghost in self.ghosts if ghost.is_interactive]
         if not active_ghosts:
             self.last_message = ""
             return PatternResult.MISSED
@@ -565,15 +831,22 @@ class GameSession:
                     self.defeated_events.append(
                         (ghost.x, ghost.y, ghost.spec.holy_power)
                     )
+                elif ghost.kind is GhostKind.CREEP:
+                    ghost.hidden_duration = self.rng.uniform(
+                        ghost.hidden_duration_min,
+                        ghost.hidden_duration_max,
+                    )
+                    ghost.hide_and_reappear_at(self._creep_reappear_position(ghost))
         forbidden_hits = [
             ghost
             for ghost in active_ghosts
             if all(ghost is not matched_ghost for matched_ghost in matched)
+            and not isinstance(entered[0], tuple)
             and ghost.matches_forbidden(entered)
         ]
         if forbidden_hits:
             for ghost in forbidden_hits:
-                ghost.resonate()
+                ghost.trigger_forbidden_pattern(entered)
             self.last_message = ""
             return PatternResult.RESONATED
 
@@ -584,8 +857,54 @@ class GameSession:
         self.last_message = ""
         return PatternResult.MISSED
 
+    def _creep_reappear_position(self, ghost: Ghost) -> tuple[float, float]:
+        dx = ghost.x - ghost.target_x
+        dy = ghost.y - ghost.target_y
+        distance = math.hypot(dx, dy) or 1.0
+        min_distance = ghost.radius + 185.0
+        base_distance = max(min_distance, distance - self.rng.uniform(25.0, 70.0))
+        base_angle = math.atan2(dy, dx)
+        for _ in range(32):
+            angle = base_angle + self.rng.uniform(-1.45, 1.45)
+            candidate_distance = max(
+                min_distance,
+                base_distance + self.rng.uniform(-25.0, 90.0),
+            )
+            candidate = (
+                ghost.target_x + math.cos(angle) * candidate_distance,
+                ghost.target_y + math.sin(angle) * candidate_distance,
+            )
+            if self._position_is_clear_for_creep(ghost, candidate):
+                return candidate
+        for ring_index in range(40):
+            ring = base_distance + ring_index * 55.0
+            for step in range(16):
+                angle = base_angle + step * math.tau / 16
+                candidate = (
+                    ghost.target_x + math.cos(angle) * ring,
+                    ghost.target_y + math.sin(angle) * ring,
+                )
+                if self._position_is_clear_for_creep(ghost, candidate):
+                    return candidate
+        return (
+            ghost.target_x + dx / distance * (base_distance + 2600.0),
+            ghost.target_y + dy / distance * (base_distance + 2600.0),
+        )
+
+    def _position_is_clear_for_creep(
+        self, ghost: Ghost, candidate: tuple[float, float]
+    ) -> bool:
+        return all(
+            other is ghost
+            or other.vanishing
+            or other.hidden_remaining > 0
+            or math.hypot(other.x - candidate[0], other.y - candidate[1])
+            >= self.SPAWN_CLEARANCE
+            for other in self.ghosts
+        )
+
     def _cast_spell(self, spell: SpellDefinition) -> None:
-        active_ghosts = [ghost for ghost in self.ghosts if not ghost.vanishing]
+        active_ghosts = [ghost for ghost in self.ghosts if ghost.is_interactive]
         if spell.spell_type is SpellType.HEAL:
             if self.health >= self.max_health:
                 return
@@ -600,17 +919,20 @@ class GameSession:
                     self.spells.REPEL_RADIUS
                 ):
                     ghost.repel(self.spells.REPEL_DISTANCE)
+                    ghost.slow_remaining = self.spells.REPEL_SLOW_DURATION
         elif spell.spell_type is SpellType.NULLIFY:
             self.spells.spend(spell)
             for ghost in active_ghosts:
-                if ghost.distance_to((ghost.target_x, ghost.target_y)) <= (
-                    self.spells.NULLIFY_RADIUS
-                ):
-                    ghost.nullify_gimmick()
-        elif spell.spell_type is SpellType.SLOW:
+                ghost.nullify_gimmick()
+        elif spell.spell_type is SpellType.TRUTH:
             self.spells.spend(spell)
-            for ghost in active_ghosts:
-                ghost.slow_remaining = self.spells.SLOW_DURATION
+            for ghost in self.ghosts:
+                if ghost.kind is GhostKind.CREEP and not ghost.vanishing:
+                    ghost.reveal_now()
+                if ghost.kind is GhostKind.FORBIDDEN:
+                    ghost.kind = GhostKind.SLOWPOKE
+                    ghost.forbidden_patterns.clear()
+                    ghost.resonance_remaining = 0.0
 
     def target_ghost(self) -> Optional[Ghost]:
         if not self.ghosts:
