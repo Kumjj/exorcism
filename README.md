@@ -39,11 +39,17 @@ any holy-power spell is successfully cast.
 
 ## Controls
 
+- The game opens on `main.png` with `START` and `SETTINGS` menu options.
+- `SETTINGS` provides mouse-draggable background-music and sound-effect volume
+  sliders, plus a `BACK` button.
 - Hold the left mouse button and drag through nodes.
 - Release the mouse button to submit the pattern.
 - Hold `Shift` while drawing to store a first layer, then draw a second layer
   without `Shift` to submit a two-layer pattern.
 - Press `P` or `Esc` during play to pause.
+- Secret shortcut: `Ctrl+Shift+G` skips the opening story to gameplay. During
+  regular gameplay it jumps to the Piton intro video; pressing it again during
+  that video or its fade transitions starts the Piton battle immediately.
 
 Each ghost carries one to three patterns above its head. Every submitted
 pattern is checked against the first remaining pattern of every active ghost.
@@ -55,6 +61,28 @@ reaches the player.
 One-pattern ghosts appear most often, two-pattern ghosts appear regularly, and
 three-pattern ghosts are rare. Normal patterns accept either drawing direction.
 Only the start-locked variant requires the marked start point.
+
+Stage 1 is limited to three curated waves:
+
+- Wave 1 introduces ordinary and start-locked ghosts with short patterns.
+- Wave 2 adds hiding creeps with two or three patterns.
+- Wave 3 mixes hiding, start-locked, and forbidden-pattern ghosts while shifting
+  toward longer patterns. Forbidden traps deliberately reuse another ghost's
+  required pattern.
+
+After wave 3, the screen fades to black and `exorcism3.mp4` plays before the
+Piton boss battle. Piton has three rows of seven patterns. Sealed pattern slots
+cannot be attacked; each `SANCTIFY` cast removes one seal. Adjacent sealed slots
+share one rectangular seal frame. Piton adds a random seal every 10 seconds and
+adds another when advancing to rows two and three. If `SANCTIFY` itself is
+sealed, it returns automatically after five seconds.
+
+Piton approaches 1.5 times more slowly than the slowest regular ghost. Contact
+deals two health, then Piton fades out and reappears from a clear outer
+direction. Support ghosts spawn more frequently as each boss row is cleared.
+
+When Peter's health reaches zero, gameplay fades to black and then reveals
+`peter_defeat_scene.png` before the game-over controls appear.
 
 Ghost behavior variants:
 

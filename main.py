@@ -17,6 +17,7 @@ from core import (
     GameSession,
     Ghost,
     GhostKind,
+    PitonBoss,
     PatternInput,
     PatternResult,
     SpellDefinition,
@@ -193,8 +194,18 @@ class ExorcismGame:
             or pygame.font.match_font("notosanscjkkr")
         )
         self.dialogue_font = pygame.font.Font(dialogue_font_path, 30)
-        self.state = "tutorial"
+        self.state = "menu"
         self.running = True
+        self.menu_background = self._load_cover_image("main.png")
+        self.menu_reveal_elapsed = 0.0
+        self.menu_reveal_duration = 1.0
+        self.screen_transition_target: str | None = None
+        self.screen_transition_elapsed = 0.0
+        self.screen_transition_duration = 0.9
+        self.screen_transition_switched = False
+        self.bgm_volume = 1.0
+        self.sfx_volume = 1.0
+        self.active_slider: str | None = None
         self.session = GameSession(rng=random.Random())
         self.pattern_input = PatternInput()
         self.last_drag_position: tuple[int, int] | None = None
@@ -226,13 +237,30 @@ class ExorcismGame:
         self.player_attack_timer = 0.0
         self.player_attack_duration = 0.65
         self.ghost_images = self._load_ghost_images()
+        self.piton_images = {
+            state: self._load_scaled_image(f"piton_{state}.png", 176)
+            for state in ("idle", "attacked", "defeated")
+        }
+        self.defeat_background = self._load_cover_image(
+            "peter_defeat_scene.png"
+        )
         self.stage_background = self._load_cover_image("stage1.png")
         self.pending_shift_pattern: tuple[int, ...] = ()
         self.input_shift_layer = False
         self.input_shift_cancelled = False
         self.grid_intro_elapsed = 0.0
         self.grid_intro_duration = 1.05
-        self.start_button = Button(pygame.Rect(490, 465, 220, 64), "START")
+        self.start_button = Button(pygame.Rect(470, 405, 260, 58), "START")
+        self.settings_button = Button(
+            pygame.Rect(470, 478, 260, 58),
+            "SETTINGS",
+        )
+        self.settings_back_button = Button(
+            pygame.Rect(470, 585, 260, 54),
+            "BACK",
+        )
+        self.bgm_slider_rect = pygame.Rect(430, 322, 340, 12)
+        self.sfx_slider_rect = pygame.Rect(430, 432, 340, 12)
         self.retry_button = Button(pygame.Rect(490, 480, 220, 64), "RETRY")
         self.resume_button = Button(pygame.Rect(490, 330, 220, 64), "RESUME")
         self.pause_restart_button = Button(pygame.Rect(490, 410, 220, 64), "RESTART")
@@ -286,6 +314,19 @@ class ExorcismGame:
         self.story_transition_elapsed = 0.0
         self.story_transition_duration = 1.8
         self.story_game_ready = False
+        self.stage_clear_elapsed = 0.0
+        self.stage_clear_delay = 1.35
+        self.boss_transition_elapsed = 0.0
+        self.boss_transition_duration = 1.5
+        self.boss_video: VideoPlayer | None = None
+        self.boss_video_sound = self._load_tutorial_video_sound(
+            Path(__file__).with_name("exorcism3.mp4")
+        )
+        self.boss_video_channel: pygame.mixer.Channel | None = None
+        self.boss_support_timer = 4.5
+        self.defeat_transition_elapsed = 0.0
+        self.defeat_transition_duration = 1.4
+        self.defeat_scene_ready = False
         self.peter_speak_sound = self._load_sound("peter_speak.wav")
         if self.peter_speak_sound is not None:
             self.peter_speak_sound.set_volume(0.42)
@@ -300,7 +341,8 @@ class ExorcismGame:
         if self.ghost_defeated_sound is not None:
             self.ghost_defeated_sound.set_volume(0.85)
         self.ghost_boo_channels: dict[int, pygame.mixer.Channel] = {}
-        self._start_tutorial_audio()
+        self._apply_audio_settings()
+        self._start_ambient_audio()
 
     def _load_sound(self, filename: str) -> pygame.mixer.Sound | None:
         sound_path = Path(__file__).with_name(filename)
@@ -369,14 +411,42 @@ class ExorcismGame:
         except (OSError, subprocess.CalledProcessError, pygame.error):
             return None
 
-    def _start_tutorial_audio(self) -> None:
+    def _start_ambient_audio(self) -> None:
+        if self.story_music_sound is not None:
+            self.story_music_channel = self.story_music_sound.play(loops=-1)
+        self._apply_audio_settings()
+
+    def _begin_tutorial(self) -> None:
+        self.tutorial_video.close()
+        tutorial_path = Path(__file__).with_name("exorcism_sceen1.mp4")
+        self.tutorial_video = VideoPlayer(tutorial_path, (WIDTH, HEIGHT))
+        self.tutorial_reveal_elapsed = 0.0
+        self.tutorial_success_elapsed = 0.0
+        self.tutorial_success_active = False
+        self.pattern_input.clear()
+        self.state = "tutorial"
         if self.tutorial_video_sound is not None:
             self.tutorial_video_channel = self.tutorial_video_sound.play()
         self.tutorial_video.sync_start()
-        if self.story_music_sound is not None:
-            self.story_music_channel = self.story_music_sound.play(loops=-1)
-            if self.story_music_channel is not None:
-                self.story_music_channel.set_volume(0.2)
+        self._apply_audio_settings()
+
+    def _apply_audio_settings(self) -> None:
+        if self.story_music_channel is not None:
+            self.story_music_channel.set_volume(0.2 * self.bgm_volume)
+        if self.tutorial_video_channel is not None:
+            self.tutorial_video_channel.set_volume(self.sfx_volume)
+        if self.story_video_channel is not None:
+            self.story_video_channel.set_volume(0.72 * self.sfx_volume)
+        if self.boss_video_channel is not None:
+            self.boss_video_channel.set_volume(0.78 * self.sfx_volume)
+        if self.peter_speak_sound is not None:
+            self.peter_speak_sound.set_volume(0.42 * self.sfx_volume)
+        for sound in self.boo_sounds:
+            sound.set_volume(0.72 * self.sfx_volume)
+        if self.ghost_defeated_sound is not None:
+            self.ghost_defeated_sound.set_volume(0.85 * self.sfx_volume)
+        if self.magic_spell_sound is not None:
+            self.magic_spell_sound.set_volume(self.sfx_volume)
 
     def _load_player_images(self) -> list[pygame.Surface]:
         frames = [
@@ -457,10 +527,14 @@ class ExorcismGame:
         self.tutorial_video.close()
         if self.story_video is not None:
             self.story_video.close()
+        if self.boss_video is not None:
+            self.boss_video.close()
         if self.tutorial_video_channel is not None:
             self.tutorial_video_channel.stop()
         if self.story_video_channel is not None:
             self.story_video_channel.stop()
+        if self.boss_video_channel is not None:
+            self.boss_video_channel.stop()
         if self.story_music_channel is not None:
             self.story_music_channel.stop()
         if self.magic_spell_channel is not None:
@@ -485,6 +559,9 @@ class ExorcismGame:
         self.spell_panel_hover_grace = 0.0
         self.reward_orbs.clear()
         self.player_attack_timer = 0.0
+        self.stage_clear_elapsed = 0.0
+        self.boss_transition_elapsed = 0.0
+        self.boss_support_timer = 4.5
         self.spawn_timer = self.grid_intro_duration + 0.25
         self.message_timer = 0.0
         self.state = "playing"
@@ -493,22 +570,38 @@ class ExorcismGame:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
+            elif self.screen_transition_target is not None:
+                continue
+            elif (
+                event.type == pygame.KEYDOWN
+                and event.key == pygame.K_g
+                and event.mod & pygame.KMOD_CTRL
+                and event.mod & pygame.KMOD_SHIFT
+            ):
+                self._handle_secret_skip()
+                continue
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                 if self.state == "playing":
                     self._pause_game()
                 elif self.state == "paused":
                     self._resume_game()
+                elif self.state == "settings":
+                    self._start_screen_transition("menu")
                 else:
                     self.running = False
 
-            if self.state == "start":
+            if self.state == "menu":
                 if self.start_button.clicked(event):
-                    self._start_game()
+                    self._start_screen_transition("tutorial")
+                elif self.settings_button.clicked(event):
+                    self._start_screen_transition("settings")
                 elif event.type == pygame.KEYDOWN and event.key in (
                     pygame.K_RETURN,
                     pygame.K_SPACE,
                 ):
-                    self._start_game()
+                    self._start_screen_transition("tutorial")
+            elif self.state == "settings":
+                self._handle_settings_event(event)
             elif self.state == "tutorial":
                 self._handle_tutorial_event(event)
             elif self.state == "story":
@@ -537,6 +630,53 @@ class ExorcismGame:
                     pygame.K_SPACE,
                 ):
                     self._resume_game()
+
+    def _handle_settings_event(self, event: pygame.event.Event) -> None:
+        if self.settings_back_button.clicked(event):
+            self.active_slider = None
+            self._start_screen_transition("menu")
+            return
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if self.bgm_slider_rect.inflate(0, 30).collidepoint(event.pos):
+                self.active_slider = "bgm"
+            elif self.sfx_slider_rect.inflate(0, 30).collidepoint(event.pos):
+                self.active_slider = "sfx"
+            if self.active_slider is not None:
+                self._set_slider_volume(event.pos[0])
+        elif event.type == pygame.MOUSEMOTION and self.active_slider is not None:
+            self._set_slider_volume(event.pos[0])
+        elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            self.active_slider = None
+
+    def _set_slider_volume(self, mouse_x: int) -> None:
+        rect = (
+            self.bgm_slider_rect
+            if self.active_slider == "bgm"
+            else self.sfx_slider_rect
+        )
+        value = max(0.0, min(1.0, (mouse_x - rect.left) / rect.width))
+        if self.active_slider == "bgm":
+            self.bgm_volume = value
+        else:
+            self.sfx_volume = value
+        self._apply_audio_settings()
+
+    def _start_screen_transition(self, target: str) -> None:
+        if self.screen_transition_target is not None:
+            return
+        self.screen_transition_target = target
+        self.screen_transition_elapsed = 0.0
+        self.screen_transition_switched = False
+
+    def _switch_screen_transition_target(self) -> None:
+        target = self.screen_transition_target
+        if target == "tutorial":
+            self._begin_tutorial()
+        elif target in ("menu", "settings"):
+            self.state = target
+            if target == "menu":
+                self.menu_reveal_elapsed = self.menu_reveal_duration
+        self.screen_transition_switched = True
 
     def _handle_tutorial_event(self, event: pygame.event.Event) -> None:
         if (
@@ -606,10 +746,9 @@ class ExorcismGame:
         self.story_video_sound = self._load_tutorial_video_sound(story_path)
         if self.story_video_sound is not None:
             self.story_video_channel = self.story_video_sound.play()
-            if self.story_video_channel is not None:
-                self.story_video_channel.set_volume(0.72)
         if self.story_video is not None:
             self.story_video.sync_start()
+        self._apply_audio_settings()
 
     def _handle_story_event(self, event: pygame.event.Event) -> None:
         if (
@@ -641,10 +780,90 @@ class ExorcismGame:
 
     def _prepare_game_after_story(self) -> None:
         self._start_game()
-        self.grid_intro_elapsed = self.grid_intro_duration
-        self.spawn_timer = 0.35
         self.state = "story_transition"
         self.story_game_ready = True
+
+    def _start_boss_intro_transition(self) -> None:
+        self.state = "boss_intro_transition"
+        self.boss_transition_elapsed = 0.0
+        self.pattern_input.clear()
+        self._stop_all_ghost_boo()
+
+    def _start_boss_video(self) -> None:
+        boss_path = Path(__file__).with_name("exorcism3.mp4")
+        self.boss_video = VideoPlayer(
+            boss_path,
+            (WIDTH, HEIGHT),
+            duration=6.04,
+        )
+        if self.boss_video_sound is not None:
+            self.boss_video_channel = self.boss_video_sound.play()
+        self.boss_video.sync_start()
+        self._apply_audio_settings()
+        self.state = "boss_video"
+
+    def _start_boss_return_transition(self) -> None:
+        self.state = "boss_return_transition"
+        self.boss_transition_elapsed = 0.0
+        if self.boss_video_channel is not None:
+            self.boss_video_channel.stop()
+            self.boss_video_channel = None
+
+    def _prepare_boss_battle(self) -> None:
+        self.session.start_boss_battle(SPAWN_POSITIONS, PLAYER_POSITION)
+        self.grid_intro_elapsed = 0.0
+        self.spawn_timer = self.grid_intro_duration + 0.25
+        self.boss_support_timer = 3.4
+
+    def _skip_intro(self) -> None:
+        if self.tutorial_video_channel is not None:
+            self.tutorial_video_channel.stop()
+            self.tutorial_video_channel = None
+        if self.story_video_channel is not None:
+            self.story_video_channel.stop()
+            self.story_video_channel = None
+        self.magic_spell_channel.stop()
+        self.tutorial_video.close()
+        if self.story_video is not None:
+            self.story_video.close()
+        self._start_game()
+
+    def _handle_secret_skip(self) -> None:
+        if self.state in ("tutorial", "story", "story_transition"):
+            self._skip_intro()
+        elif self.state == "playing" and not self.session.boss_battle:
+            self.session.spawn_queue.clear()
+            self.session.kind_queue.clear()
+            self.session.ghosts.clear()
+            self.session.stage_cleared = True
+            self.stage_clear_elapsed = self.stage_clear_delay
+            self._start_boss_intro_transition()
+        elif self.state in (
+            "boss_intro_transition",
+            "boss_video",
+            "boss_return_transition",
+        ):
+            self._skip_to_boss_battle()
+
+    def _skip_to_boss_battle(self) -> None:
+        if self.boss_video_channel is not None:
+            self.boss_video_channel.stop()
+            self.boss_video_channel = None
+        if self.boss_video is not None:
+            self.boss_video.close()
+        if self.session.boss is None:
+            self._prepare_boss_battle()
+        self.state = "playing"
+        self.grid_intro_elapsed = 0.0
+
+    def _start_defeat_transition(self) -> None:
+        if self.state in ("defeat_transition", "gameover"):
+            return
+        self.state = "defeat_transition"
+        self.defeat_transition_elapsed = 0.0
+        self.defeat_scene_ready = False
+        self.pattern_input.clear()
+        self._stop_all_ghost_boo()
 
     def _pause_game(self) -> None:
         self.pattern_input.clear()
@@ -714,6 +933,11 @@ class ExorcismGame:
             id(ghost) for ghost in self.session.ghosts if ghost.vanishing
         }
         result = self.session.judge_pattern(pattern)
+        if (
+            self.session.boss_last_event == "defeated"
+            and self.ghost_defeated_sound is not None
+        ):
+            self.ghost_defeated_sound.play()
         defeated_ghosts = [
             ghost
             for ghost in self.session.ghosts
@@ -815,6 +1039,28 @@ class ExorcismGame:
         self.flash_timer = 0.22 if self.flash_color else 0.0
 
     def _update(self, seconds: float) -> None:
+        if self.screen_transition_target is not None:
+            self.screen_transition_elapsed = min(
+                self.screen_transition_duration,
+                self.screen_transition_elapsed + seconds,
+            )
+            midpoint = self.screen_transition_duration / 2.0
+            if (
+                not self.screen_transition_switched
+                and self.screen_transition_elapsed >= midpoint
+            ):
+                self._switch_screen_transition_target()
+            if self.screen_transition_elapsed >= self.screen_transition_duration:
+                self.screen_transition_target = None
+                self.screen_transition_switched = False
+        if self.state == "menu":
+            self.menu_reveal_elapsed = min(
+                self.menu_reveal_duration,
+                self.menu_reveal_elapsed + seconds,
+            )
+            return
+        if self.state == "settings":
+            return
         if self.state == "tutorial":
             self._update_tutorial(seconds)
             return
@@ -824,27 +1070,59 @@ class ExorcismGame:
         if self.state == "story_transition":
             self._update_story_transition(seconds)
             return
+        if self.state == "boss_intro_transition":
+            self.boss_transition_elapsed = min(
+                self.boss_transition_duration,
+                self.boss_transition_elapsed + seconds,
+            )
+            if self.boss_transition_elapsed >= self.boss_transition_duration:
+                self._start_boss_video()
+            return
+        if self.state == "boss_video":
+            if self.boss_video is not None:
+                self.boss_video.update(seconds)
+                if self.boss_video.ended:
+                    self._start_boss_return_transition()
+            return
+        if self.state == "boss_return_transition":
+            self._update_boss_return_transition(seconds)
+            return
+        if self.state == "defeat_transition":
+            self._update_defeat_transition(seconds)
+            return
         if self.state != "playing":
             return
 
-        self.spawn_timer -= seconds
-        active_limit = min(2 + self.session.wave // 2, 5)
-        if (
-            self.spawn_timer <= 0
-            and self.session.spawn_queue
-            and len(self.session.ghosts) < active_limit
-        ):
-            existing_ghost_ids = {id(ghost) for ghost in self.session.ghosts}
-            spawned = self.session.spawn_next(SPAWN_POSITIONS, PLAYER_POSITION)
-            if spawned:
-                for ghost in self.session.ghosts:
-                    if id(ghost) not in existing_ghost_ids:
-                        self._play_ghost_spawn_sound(ghost)
-            self.spawn_timer = (
-                max(0.75, 2.15 - self.session.wave * 0.1)
-                if spawned
-                else 0.25
-            )
+        if self.session.stage_cleared and not self.session.boss_battle:
+            self.stage_clear_elapsed += seconds
+            if self.stage_clear_elapsed >= self.stage_clear_delay:
+                self._start_boss_intro_transition()
+            return
+
+        if self.session.boss_battle:
+            self._update_boss_battle(seconds)
+        else:
+            self.spawn_timer -= seconds
+            active_limit = min(2 + self.session.wave // 2, 5)
+            if (
+                self.spawn_timer <= 0
+                and self.session.spawn_queue
+                and len(self.session.ghosts) < active_limit
+            ):
+                existing_ghost_ids = {id(ghost) for ghost in self.session.ghosts}
+                spawned = self.session.spawn_next(
+                    SPAWN_POSITIONS,
+                    PLAYER_POSITION,
+                )
+                if spawned:
+                    for ghost in self.session.ghosts:
+                        if id(ghost) not in existing_ghost_ids:
+                            self._play_ghost_spawn_sound(ghost)
+                self.spawn_timer = (
+                    max(0.75, 2.15 - self.session.wave * 0.1)
+                    if spawned
+                    else 0.25
+                )
 
         escaped = self.session.update_ghosts(
             seconds, PLAYER_POSITION, PLAYER_RADIUS
@@ -855,8 +1133,7 @@ class ExorcismGame:
             self.flash_color = RED
             self.flash_timer = 0.22
         if self.session.health <= 0:
-            self.state = "gameover"
-            self.pattern_input.clear()
+            self._start_defeat_transition()
             return
 
         if self.session.advance_wave_if_clear():
@@ -989,8 +1266,76 @@ class ExorcismGame:
             and self.story_transition_elapsed >= midpoint
         ):
             self._prepare_game_after_story()
+        if self.story_game_ready:
+            self.grid_intro_elapsed = min(
+                self.grid_intro_duration,
+                self.story_transition_elapsed - midpoint,
+            )
         if self.story_transition_elapsed >= self.story_transition_duration:
             self.state = "playing"
+
+    def _update_boss_return_transition(self, seconds: float) -> None:
+        self.boss_transition_elapsed = min(
+            self.story_transition_duration,
+            self.boss_transition_elapsed + seconds,
+        )
+        midpoint = self.story_transition_duration / 2.0
+        if (
+            self.session.boss is None
+            and self.boss_transition_elapsed >= midpoint
+        ):
+            self._prepare_boss_battle()
+        if self.session.boss is not None:
+            self.grid_intro_elapsed = min(
+                self.grid_intro_duration,
+                self.boss_transition_elapsed - midpoint,
+            )
+        if self.boss_transition_elapsed >= self.story_transition_duration:
+            self.state = "playing"
+
+    def _update_boss_battle(self, seconds: float) -> None:
+        boss = self.session.boss
+        if boss is None:
+            return
+        damage = self.session.update_boss(
+            seconds,
+            SPAWN_POSITIONS,
+            PLAYER_POSITION,
+            PLAYER_RADIUS,
+        )
+        if damage:
+            self.flash_color = RED
+            self.flash_timer = 0.3
+        if boss.defeated:
+            return
+        self.boss_support_timer -= seconds
+        support_limits = (2, 3, 4)
+        support_limit = support_limits[boss.row_index]
+        if self.boss_support_timer <= 0 and len(self.session.ghosts) < support_limit:
+            ghost = self.session.spawn_boss_support(
+                SPAWN_POSITIONS,
+                PLAYER_POSITION,
+            )
+            if ghost is not None:
+                self._play_ghost_spawn_sound(ghost)
+            intervals = (4.4, 3.2, 2.2)
+            self.boss_support_timer = (
+                intervals[boss.row_index] if ghost is not None else 0.25
+            )
+
+    def _update_defeat_transition(self, seconds: float) -> None:
+        self.defeat_transition_elapsed = min(
+            self.defeat_transition_duration,
+            self.defeat_transition_elapsed + seconds,
+        )
+        midpoint = self.defeat_transition_duration / 2.0
+        if (
+            not self.defeat_scene_ready
+            and self.defeat_transition_elapsed >= midpoint
+        ):
+            self.defeat_scene_ready = True
+        if self.defeat_transition_elapsed >= self.defeat_transition_duration:
+            self.state = "gameover"
 
     def _spell_panel_rect(self) -> pygame.Rect:
         eased = 1.0 - (1.0 - self.spell_panel_progress) ** 3
@@ -1035,20 +1380,216 @@ class ExorcismGame:
     def _draw(self) -> None:
         self.screen.fill(BG)
         self._draw_background()
-        if self.state == "start":
-            self._draw_start()
+        if self.state == "menu":
+            self._draw_menu()
+        elif self.state == "settings":
+            self._draw_settings()
         elif self.state == "tutorial":
             self._draw_tutorial()
         elif self.state == "story":
             self._draw_story()
         elif self.state == "story_transition":
             self._draw_story_transition()
+        elif self.state == "boss_intro_transition":
+            self._draw_boss_intro_transition()
+        elif self.state == "boss_video":
+            self._draw_boss_video()
+        elif self.state == "boss_return_transition":
+            self._draw_boss_return_transition()
+        elif self.state == "defeat_transition":
+            self._draw_defeat_transition()
         elif self.state == "playing":
             self._draw_playing()
         elif self.state == "paused":
             self._draw_paused()
         else:
             self._draw_gameover()
+        self._draw_screen_fade()
+
+    def _draw_boss_intro_transition(self) -> None:
+        self._draw_playing()
+        progress = min(
+            1.0,
+            self.boss_transition_elapsed / self.boss_transition_duration,
+        )
+        eased = progress * progress * (3.0 - 2.0 * progress)
+        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, round(255 * eased)))
+        self.screen.blit(overlay, (0, 0))
+
+    def _draw_boss_video(self) -> None:
+        if self.boss_video is not None and self.boss_video.surface is not None:
+            self.screen.blit(self.boss_video.surface, (0, 0))
+        else:
+            self.screen.fill((0, 0, 0))
+
+    def _draw_boss_return_transition(self) -> None:
+        midpoint = self.story_transition_duration / 2.0
+        if self.session.boss is None:
+            self._draw_boss_video()
+            fade = min(1.0, self.boss_transition_elapsed / midpoint)
+        else:
+            self._draw_playing()
+            fade = max(
+                0.0,
+                1.0
+                - (self.boss_transition_elapsed - midpoint) / midpoint,
+            )
+        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, round(255 * fade)))
+        self.screen.blit(overlay, (0, 0))
+
+    def _draw_defeat_background(self) -> None:
+        if self.defeat_background is not None:
+            self.screen.blit(self.defeat_background, (0, 0))
+        else:
+            self.screen.fill((8, 7, 14))
+
+    def _draw_defeat_transition(self) -> None:
+        midpoint = self.defeat_transition_duration / 2.0
+        if self.defeat_scene_ready:
+            self._draw_defeat_background()
+            fade = max(
+                0.0,
+                1.0
+                - (self.defeat_transition_elapsed - midpoint) / midpoint,
+            )
+        else:
+            self._draw_playing()
+            fade = min(1.0, self.defeat_transition_elapsed / midpoint)
+        eased = fade * fade * (3.0 - 2.0 * fade)
+        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, round(255 * eased)))
+        self.screen.blit(overlay, (0, 0))
+
+    def _draw_menu_background(self) -> None:
+        if self.menu_background is not None:
+            self.screen.blit(self.menu_background, (0, 0))
+        else:
+            self.screen.fill(BG)
+            self._draw_background()
+        shade = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        shade.fill((4, 5, 12, 72))
+        self.screen.blit(shade, (0, 0))
+
+    def _draw_menu(self) -> None:
+        self._draw_menu_background()
+        progress = min(
+            1.0,
+            self.menu_reveal_elapsed / self.menu_reveal_duration,
+        )
+        eased = progress * progress * (3.0 - 2.0 * progress)
+        controls = max(0.0, min(1.0, (eased - 0.28) / 0.72))
+        self._draw_menu_button(self.start_button, controls)
+        self._draw_menu_button(self.settings_button, controls)
+        black = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        black.fill((0, 0, 0, round(255 * (1.0 - eased))))
+        self.screen.blit(black, (0, 0))
+
+    def _draw_menu_button(self, button: Button, alpha_scale: float = 1.0) -> None:
+        hovered = button.rect.collidepoint(pygame.mouse.get_pos())
+        lift = 3 if hovered else 0
+        rect = button.rect.move(0, -lift)
+        layer = pygame.Surface(rect.size, pygame.SRCALPHA)
+        pygame.draw.rect(
+            layer,
+            (10, 12, 24, round(205 * alpha_scale)),
+            layer.get_rect(),
+            border_radius=14,
+        )
+        border = GOLD if hovered else (178, 183, 202)
+        pygame.draw.rect(
+            layer,
+            (*border, round((225 if hovered else 125) * alpha_scale)),
+            layer.get_rect(),
+            2,
+            border_radius=14,
+        )
+        label = self.font.render(button.text, True, WHITE)
+        label.set_alpha(round(255 * alpha_scale))
+        layer.blit(label, label.get_rect(center=layer.get_rect().center))
+        self.screen.blit(layer, rect)
+
+    def _draw_settings(self) -> None:
+        self._draw_menu_background()
+        veil = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        veil.fill((0, 0, 0, 82))
+        self.screen.blit(veil, (0, 0))
+        panel = pygame.Surface((520, 480), pygame.SRCALPHA)
+        pygame.draw.rect(
+            panel,
+            (8, 10, 20, 226),
+            panel.get_rect(),
+            border_radius=22,
+        )
+        pygame.draw.rect(
+            panel,
+            (*GOLD, 115),
+            panel.get_rect(),
+            2,
+            border_radius=22,
+        )
+        self.screen.blit(panel, panel.get_rect(center=(WIDTH // 2, 365)))
+        title = self.font_large.render("SETTINGS", True, WHITE)
+        self.screen.blit(title, title.get_rect(center=(WIDTH // 2, 180)))
+        self._draw_volume_slider(
+            "BACKGROUND MUSIC",
+            self.bgm_slider_rect,
+            self.bgm_volume,
+        )
+        self._draw_volume_slider(
+            "SOUND EFFECTS",
+            self.sfx_slider_rect,
+            self.sfx_volume,
+        )
+        self._draw_menu_button(self.settings_back_button)
+
+    def _draw_volume_slider(
+        self,
+        label: str,
+        rect: pygame.Rect,
+        value: float,
+    ) -> None:
+        text = self.font.render(label, True, WHITE)
+        self.screen.blit(text, (rect.left, rect.top - 48))
+        value_text = self.font_small.render(
+            f"{round(value * 100)}%",
+            True,
+            MUTED,
+        )
+        self.screen.blit(
+            value_text,
+            value_text.get_rect(bottomright=(rect.right, rect.top - 13)),
+        )
+        pygame.draw.rect(
+            self.screen,
+            (40, 43, 58),
+            rect,
+            border_radius=6,
+        )
+        fill = rect.copy()
+        fill.width = round(rect.width * value)
+        if fill.width > 0:
+            pygame.draw.rect(self.screen, GOLD, fill, border_radius=6)
+        knob = (rect.left + round(rect.width * value), rect.centery)
+        pygame.draw.circle(self.screen, (15, 17, 28), knob, 13)
+        pygame.draw.circle(self.screen, GOLD, knob, 9)
+
+    def _draw_screen_fade(self) -> None:
+        if self.screen_transition_target is None:
+            return
+        midpoint = self.screen_transition_duration / 2.0
+        if self.screen_transition_elapsed <= midpoint:
+            progress = self.screen_transition_elapsed / midpoint
+        else:
+            progress = (
+                self.screen_transition_duration - self.screen_transition_elapsed
+            ) / midpoint
+        eased = max(0.0, min(1.0, progress))
+        eased = eased * eased * (3.0 - 2.0 * eased)
+        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, round(255 * eased)))
+        self.screen.blit(overlay, (0, 0))
 
     def _draw_story(self) -> None:
         if self.story_video is not None and self.story_video.surface is not None:
@@ -1399,8 +1940,136 @@ class ExorcismGame:
             reverse=True,
         ):
             self._draw_ghost(ghost)
+        if self.session.boss is not None:
+            self._draw_piton(self.session.boss)
 
         self._draw_large_grid()
+
+    def _draw_piton(self, boss: PitonBoss) -> None:
+        alpha = boss.alpha
+        if alpha <= 0:
+            return
+        x = round(boss.x)
+        y = round(boss.y + math.sin(boss.pulse * 1.3) * 3)
+        aura = pygame.Surface((230, 230), pygame.SRCALPHA)
+        pygame.draw.circle(aura, (124, 68, 184, alpha // 5), (115, 115), 108)
+        pygame.draw.circle(aura, (205, 146, 255, alpha // 2), (115, 115), 94, 3)
+        self.screen.blit(aura, aura.get_rect(center=(x, y)))
+        state = (
+            "defeated"
+            if boss.defeated
+            else "attacked"
+            if boss.is_hit_reacting or boss.knockback_active
+            else "idle"
+        )
+        source_image = self.piton_images.get(state)
+        if source_image is not None:
+            image = source_image.copy()
+            image.set_alpha(alpha)
+            self.screen.blit(image, image.get_rect(center=(x, y)))
+        else:
+            pygame.draw.circle(self.screen, (90, 48, 125), (x, y), boss.radius)
+        name = self.font.render(
+            f"PITON  SEAL {boss.row_number}/3",
+            True,
+            (226, 195, 255),
+        )
+        name.set_alpha(alpha)
+        self.screen.blit(name, name.get_rect(center=(x, y - 122)))
+        self._draw_piton_patterns(boss, (x, y - 82), alpha)
+
+    def _draw_piton_patterns(
+        self,
+        boss: PitonBoss,
+        center: tuple[int, int],
+        opacity: int,
+    ) -> None:
+        slot_width = 54
+        count = len(boss.patterns)
+        total_width = max(1, count) * slot_width
+        start_x = max(
+            24,
+            min(WIDTH - total_width - 24, center[0] - total_width // 2),
+        )
+        layer = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        card = pygame.Rect(start_x - 8, center[1] - 29, total_width + 16, 58)
+        pygame.draw.rect(layer, (10, 8, 22, 205), card, border_radius=9)
+        pygame.draw.rect(layer, (160, 112, 210, 155), card, 2, border_radius=9)
+        for index, pattern in enumerate(boss.patterns):
+            pattern_center = (
+                start_x + index * slot_width + slot_width // 2,
+                center[1],
+            )
+            frame = pygame.Rect(
+                pattern_center[0] - 20,
+                pattern_center[1] - 20,
+                40,
+                40,
+            )
+            color = (120, 84, 145) if index in boss.sealed_slots else PATTERN_COLOR
+            pygame.draw.rect(layer, (*color, 145), frame, 2, border_radius=5)
+            self._draw_pattern_on_surface(
+                layer,
+                pattern,
+                pattern_center,
+                11,
+                (*color, opacity),
+                5,
+            )
+        for first, last in self._contiguous_ranges(boss.sealed_slots):
+            seal_rect = pygame.Rect(
+                start_x + first * slot_width + 2,
+                center[1] - 25,
+                (last - first + 1) * slot_width - 4,
+                50,
+            )
+            pygame.draw.rect(
+                layer,
+                (91, 32, 118, 88),
+                seal_rect,
+                border_radius=7,
+            )
+            pygame.draw.rect(
+                layer,
+                (226, 107, 255, 235),
+                seal_rect,
+                3,
+                border_radius=7,
+            )
+            pygame.draw.line(
+                layer,
+                (226, 107, 255, 210),
+                seal_rect.topleft,
+                seal_rect.bottomright,
+                2,
+            )
+            pygame.draw.line(
+                layer,
+                (226, 107, 255, 210),
+                seal_rect.topright,
+                seal_rect.bottomleft,
+                2,
+            )
+        layer.set_alpha(opacity)
+        self.screen.blit(layer, (0, 0))
+
+    def _contiguous_ranges(
+        self,
+        indices: set[int],
+    ) -> list[tuple[int, int]]:
+        if not indices:
+            return []
+        ordered = sorted(indices)
+        ranges: list[tuple[int, int]] = []
+        start = previous = ordered[0]
+        for index in ordered[1:]:
+            if index == previous + 1:
+                previous = index
+                continue
+            ranges.append((start, previous))
+            start = previous = index
+        ranges.append((start, previous))
+        return ranges
 
     def _player_idle_frame(self) -> pygame.Surface:
         hold_ms = 1800
@@ -1809,7 +2478,11 @@ class ExorcismGame:
         self._draw_hearts((44, 48))
         score = self.font.render(f"SCORE  {self.session.score:06d}", True, WHITE)
         self.screen.blit(score, (255, 34))
-        wave = self.font.render(f"WAVE  {self.session.wave}", True, GOLD)
+        if self.session.boss_battle and self.session.boss is not None:
+            wave_text = f"PITON  ROW {self.session.boss.row_number}/3"
+        else:
+            wave_text = f"WAVE  {self.session.wave}"
+        wave = self.font.render(wave_text, True, GOLD)
         self.screen.blit(wave, (500, 34))
 
         holy = self.session.spells.holy_power
@@ -1882,8 +2555,19 @@ class ExorcismGame:
         self.screen.blit(panel, panel_rect)
         for index, spell in enumerate(SpellManager.SPELLS):
             row_y = panel_rect.y + 18 + index * 110
+            spell_seal_remaining = (
+                self.session.boss.spell_seal_remaining(spell.spell_type)
+                if self.session.boss is not None
+                and self.session.boss_battle
+                else 0.0
+            )
+            spell_is_sealed = spell_seal_remaining > 0
             spell_color = (
-                GOLD if self.session.spells.can_cast(spell) else MUTED
+                RED
+                if spell_is_sealed
+                else GOLD
+                if self.session.spells.can_cast(spell)
+                else MUTED
             )
             title = self.font.render(spell.name, True, spell_color)
             self.screen.blit(title, (panel_rect.x + 18, row_y))
@@ -1905,6 +2589,18 @@ class ExorcismGame:
                 pygame.Rect(panel_rect.x + 218, row_y + 13, 54, 54),
                 spell_color,
             )
+            if spell_is_sealed:
+                sealed = self.font_small.render(
+                    f"SEALED {spell_seal_remaining:.1f}s",
+                    True,
+                    RED,
+                )
+                self.screen.blit(
+                    sealed,
+                    sealed.get_rect(
+                        center=(panel_rect.x + 245, row_y + 79)
+                    ),
+                )
 
     def _draw_spell_cooldown_gauge(
         self,
@@ -2136,17 +2832,18 @@ class ExorcismGame:
             pygame.draw.circle(self.screen, color, nodes[pattern[0]], 9, 2)
 
     def _draw_gameover(self) -> None:
+        self._draw_defeat_background()
         overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-        overlay.fill((9, 7, 22, 205))
+        overlay.fill((9, 7, 22, 112))
         self.screen.blit(overlay, (0, 0))
         title = self.font_title.render("GAME OVER", True, RED)
-        self.screen.blit(title, title.get_rect(center=(WIDTH // 2, 220)))
+        self.screen.blit(title, title.get_rect(center=(WIDTH // 2, 170)))
         score = self.font_large.render(
             f"FINAL SCORE  {self.session.score}", True, WHITE
         )
-        self.screen.blit(score, score.get_rect(center=(WIDTH // 2, 335)))
+        self.screen.blit(score, score.get_rect(center=(WIDTH // 2, 285)))
         wave = self.font.render(f"Reached wave {self.session.wave}", True, MUTED)
-        self.screen.blit(wave, wave.get_rect(center=(WIDTH // 2, 390)))
+        self.screen.blit(wave, wave.get_rect(center=(WIDTH // 2, 335)))
         self.retry_button.draw(self.screen, self.font)
 
 

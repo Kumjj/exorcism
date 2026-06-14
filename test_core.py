@@ -287,6 +287,255 @@ class GameSessionTests(unittest.TestCase):
         self.assertGreater(counts[2], counts[3])
         self.assertGreater(counts[1] + counts[2], 180)
 
+    def test_stage_one_uses_three_curated_waves(self) -> None:
+        for wave, expected_kinds in GameSession.STAGE_ONE_WAVES.items():
+            self.session.wave = wave
+            self.session.spawn_queue.clear()
+            self.session.kind_queue.clear()
+            self.session.fill_wave()
+
+            self.assertEqual(tuple(self.session.kind_queue), expected_kinds)
+            self.assertEqual(len(self.session.spawn_queue), len(expected_kinds))
+            self.assertTrue(
+                set(expected_kinds)
+                <= {
+                    GhostKind.SLOWPOKE,
+                    GhostKind.START_LOCKED,
+                    GhostKind.CREEP,
+                    GhostKind.FORBIDDEN,
+                }
+            )
+
+    def test_third_wave_uses_advanced_stage_one_rules(self) -> None:
+        self.session.wave = 3
+        self.session.fill_wave()
+        previous_patterns = []
+
+        while self.session.spawn_queue:
+            ghost = self.session.spawn_next(((800.0, 300.0),), (400, 300))
+            self.assertIsNotNone(ghost)
+            patterns = [
+                pattern
+                for pattern in ghost.remaining_patterns
+                if isinstance(pattern[0], int)
+            ]
+            if ghost.kind is GhostKind.CREEP:
+                self.assertGreaterEqual(len(patterns), 3)
+                self.assertTrue(all(len(pattern) >= 4 for pattern in patterns))
+            elif ghost.kind is GhostKind.START_LOCKED:
+                self.assertGreaterEqual(len(patterns), 2)
+                self.assertTrue(all(len(pattern) >= 4 for pattern in patterns))
+            elif ghost.kind is GhostKind.FORBIDDEN:
+                self.assertIn(ghost.forbidden_patterns[0], previous_patterns)
+            previous_patterns.extend(patterns)
+            self.session.ghosts.clear()
+
+    def test_third_wave_clear_does_not_create_a_fourth_wave(self) -> None:
+        self.session.wave = 3
+
+        advanced = self.session.advance_wave_if_clear()
+
+        self.assertFalse(advanced)
+        self.assertTrue(self.session.stage_cleared)
+        self.assertEqual(self.session.wave, 3)
+        self.assertEqual(len(self.session.spawn_queue), 0)
+
+    def test_piton_has_three_rows_of_seven_patterns(self) -> None:
+        boss = self.session.start_boss_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+
+        self.assertEqual(len(boss.rows), 3)
+        self.assertTrue(all(len(row) == 7 for row in boss.rows))
+        self.assertEqual(len(boss.patterns), 7)
+
+    def test_repel_spell_pushes_piton_away_smoothly(self) -> None:
+        boss = self.session.start_boss_battle(
+            ((650.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.spawn_elapsed = boss.spawn_duration
+        spell = next(
+            spell
+            for spell in SpellManager.SPELLS
+            if spell.spell_type is SpellType.REPEL
+        )
+        self.session.spells.holy_power = spell.cost
+        before = boss.distance_to((400.0, 300.0))
+
+        result = self.session.judge_pattern(spell.pattern)
+
+        self.assertEqual(result, PatternResult.SPELL)
+        self.assertTrue(boss.knockback_active)
+        self.assertTrue(boss.is_hit_reacting)
+        self.assertEqual(boss.distance_to((400.0, 300.0)), before)
+        boss.update(boss.knockback_duration / 2, self.session.rng)
+        self.assertGreater(boss.distance_to((400.0, 300.0)), before)
+        self.assertTrue(boss.knockback_active)
+        boss.update(boss.knockback_duration / 2, self.session.rng)
+        self.assertFalse(boss.knockback_active)
+
+    def test_piton_sealed_pattern_requires_one_purify_per_slot(self) -> None:
+        boss = self.session.start_boss_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.spawn_elapsed = boss.spawn_duration
+        boss.sealed_slots = {0, 1, 2}
+        sealed_pattern = boss.patterns[0]
+        sanctify = next(
+            spell
+            for spell in SpellManager.SPELLS
+            if spell.spell_type is SpellType.NULLIFY
+        )
+        self.session.spells.holy_power = SpellManager.MAX_POWER
+
+        self.assertEqual(
+            self.session.judge_pattern(sealed_pattern),
+            PatternResult.MISSED,
+        )
+        self.assertEqual(
+            self.session.judge_pattern(sanctify.pattern),
+            PatternResult.SPELL,
+        )
+        self.assertEqual(len(boss.sealed_slots), 2)
+
+    def test_piton_refills_seven_patterns_for_three_rows(self) -> None:
+        boss = self.session.start_boss_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.spawn_elapsed = boss.spawn_duration
+
+        for row in range(3):
+            for _ in range(7):
+                boss.sealed_slots.clear()
+                self.session.judge_pattern(boss.patterns[0])
+            if row < 2:
+                self.assertEqual(boss.row_number, row + 2)
+                self.assertEqual(len(boss.patterns), 7)
+
+        self.assertTrue(boss.defeated)
+
+    def test_piton_pattern_seals_stop_at_four_slots(self) -> None:
+        boss = self.session.start_boss_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.spawn_elapsed = boss.spawn_duration
+
+        for _ in range(12):
+            boss.apply_random_seal(self.session.rng)
+
+        self.assertEqual(len(boss.sealed_slots), 4)
+        boss.seal_timer = 1.0
+        boss.update(5.0, self.session.rng)
+        self.assertEqual(len(boss.sealed_slots), 4)
+        self.assertEqual(boss.seal_timer, boss.seal_interval)
+        self.assertTrue(boss.purify_one())
+        self.assertEqual(boss.seal_timer, boss.seal_interval)
+
+    def test_piton_seals_one_random_spell_every_twenty_seconds(self) -> None:
+        boss = self.session.start_boss_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.spawn_elapsed = boss.spawn_duration
+        boss.spell_seal_timer = 0.0
+
+        boss.update(0.01, self.session.rng)
+
+        self.assertEqual(len(boss.sealed_spells), 1)
+        self.assertAlmostEqual(
+            boss.spell_seal_timer,
+            boss.spell_seal_interval - 0.01,
+        )
+
+    def test_piton_does_not_seal_more_than_two_spells(self) -> None:
+        boss = self.session.start_boss_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.sealed_spells = {
+            SpellManager.SPELLS[0].spell_type: 5.0,
+            SpellManager.SPELLS[1].spell_type: 5.0,
+        }
+
+        self.assertFalse(boss.apply_random_spell_seal(self.session.rng))
+        self.assertEqual(len(boss.sealed_spells), 2)
+
+    def test_clearing_a_piton_row_immediately_seals_one_spell(self) -> None:
+        boss = self.session.start_boss_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.spawn_elapsed = boss.spawn_duration
+
+        for _ in range(7):
+            boss.sealed_slots.clear()
+            self.session.judge_pattern(boss.patterns[0])
+
+        self.assertEqual(boss.row_number, 2)
+        self.assertEqual(len(boss.sealed_spells), 1)
+
+    def test_piton_spell_seal_blocks_the_selected_spell_until_expired(self) -> None:
+        boss = self.session.start_boss_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.spawn_elapsed = boss.spawn_duration
+        spell = SpellManager.SPELLS[0]
+        boss.sealed_spells[spell.spell_type] = 5.0
+        self.session.spells.holy_power = spell.cost
+
+        self.assertEqual(
+            self.session.judge_pattern(spell.pattern),
+            PatternResult.MISSED,
+        )
+        boss.update(5.0, self.session.rng)
+        self.assertEqual(
+            self.session.judge_pattern(spell.pattern),
+            PatternResult.SPELL,
+        )
+
+    def test_boss_support_spawns_clear_of_piton(self) -> None:
+        boss = self.session.start_boss_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+
+        ghost = self.session.spawn_boss_support(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+
+        self.assertIsNotNone(ghost)
+        self.assertGreaterEqual(
+            ghost.distance_to((boss.x, boss.y)),
+            self.session.SPAWN_CLEARANCE,
+        )
+
+    def test_piton_collision_deals_two_damage_and_repositions(self) -> None:
+        boss = self.session.start_boss_battle(
+            ((800.0, 300.0), (0.0, 300.0)),
+            (400.0, 300.0),
+        )
+        boss.x = 400.0
+        boss.y = 300.0
+        boss.spawn_elapsed = boss.spawn_duration
+
+        damage = self.session.update_boss(
+            0.0,
+            ((800.0, 300.0), (0.0, 300.0)),
+            (400.0, 300.0),
+            44,
+        )
+
+        self.assertEqual(damage, 2)
+        self.assertEqual(self.session.health, 3)
+        self.assertGreater(boss.hidden_remaining, 0.0)
+
     def test_forbidden_ghost_prefers_an_active_ghost_pattern(self) -> None:
         anchor = Ghost(
             GHOST_SPECS[0],

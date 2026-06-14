@@ -490,6 +490,328 @@ class Ghost:
         return self.x <= self.target_x
 
 
+@dataclass
+class PitonBoss:
+    spec: GhostSpec
+    x: float
+    y: float
+    target_x: float
+    target_y: float
+    rows: list[list[Pattern]]
+    radius: int = 58
+    row_index: int = 0
+    patterns: list[Pattern] = field(default_factory=list)
+    sealed_slots: set[int] = field(default_factory=set)
+    seal_timer: float = 12.0
+    seal_interval: float = 12.0
+    max_sealed_slots: int = 4
+    spell_seal_timer: float = 20.0
+    spell_seal_interval: float = 20.0
+    spell_seal_duration: float = 5.0
+    max_sealed_spells: int = 2
+    sealed_spells: dict[SpellType, float] = field(default_factory=dict)
+    spawn_elapsed: float = 0.0
+    spawn_duration: float = 1.0
+    hidden_remaining: float = 0.0
+    hidden_duration: float = 1.2
+    pending_x: float = 0.0
+    pending_y: float = 0.0
+    retreat_repositioned: bool = False
+    defeated: bool = False
+    fade_remaining: float = 0.0
+    fade_duration: float = 1.1
+    pulse: float = 0.0
+    movement_phase: str = "move"
+    movement_elapsed: float = 0.0
+    movement_duration: float = 3.2
+    movement_pause: float = 0.35
+    step_start_x: float = 0.0
+    step_start_y: float = 0.0
+    step_end_x: float = 0.0
+    step_end_y: float = 0.0
+    knockback_active: bool = False
+    knockback_elapsed: float = 0.0
+    knockback_duration: float = 0.52
+    knockback_start_x: float = 0.0
+    knockback_start_y: float = 0.0
+    knockback_end_x: float = 0.0
+    knockback_end_y: float = 0.0
+    hit_reaction_elapsed: float = 0.0
+    hit_reaction_duration: float = 0.7
+
+    def __post_init__(self) -> None:
+        self.patterns = list(self.rows[0])
+        self.hit_reaction_elapsed = self.hit_reaction_duration
+        self.start_moving_immediately()
+
+    @property
+    def row_number(self) -> int:
+        return self.row_index + 1
+
+    @property
+    def is_interactive(self) -> bool:
+        return (
+            not self.defeated
+            and self.hidden_remaining <= 0
+            and self.spawn_elapsed >= self.spawn_duration
+        )
+
+    @property
+    def alpha(self) -> int:
+        if self.hidden_remaining > 0:
+            progress = 1.0 - self.hidden_remaining / self.hidden_duration
+            visibility = (
+                1.0 - progress * 2.0
+                if progress < 0.5
+                else (progress - 0.5) * 2.0
+            )
+            return round(255 * max(0.0, min(1.0, visibility)))
+        spawn = min(1.0, self.spawn_elapsed / self.spawn_duration)
+        vanish = (
+            self.fade_remaining / self.fade_duration
+            if self.defeated
+            else 1.0
+        )
+        return round(255 * spawn * vanish)
+
+    def distance_to(self, position: tuple[float, float]) -> float:
+        return math.hypot(self.x - position[0], self.y - position[1])
+
+    @property
+    def hit_reaction_progress(self) -> float:
+        return min(1.0, self.hit_reaction_elapsed / self.hit_reaction_duration)
+
+    @property
+    def is_hit_reacting(self) -> bool:
+        return self.hit_reaction_progress < 1.0
+
+    def update(self, seconds: float, rng: random.Random) -> None:
+        self.pulse += seconds
+        self.hit_reaction_elapsed = min(
+            self.hit_reaction_duration,
+            self.hit_reaction_elapsed + seconds,
+        )
+        for spell_type, remaining in list(self.sealed_spells.items()):
+            remaining = max(0.0, remaining - seconds)
+            if remaining <= 0:
+                self.sealed_spells.pop(spell_type, None)
+            else:
+                self.sealed_spells[spell_type] = remaining
+        if self.defeated:
+            self.fade_remaining = max(0.0, self.fade_remaining - seconds)
+            return
+        if self.hidden_remaining > 0:
+            before = self.hidden_remaining
+            self.hidden_remaining = max(0.0, self.hidden_remaining - seconds)
+            midpoint = self.hidden_duration / 2.0
+            if (
+                not self.retreat_repositioned
+                and before > midpoint
+                and self.hidden_remaining <= midpoint
+            ):
+                self.x = self.pending_x
+                self.y = self.pending_y
+                self.retreat_repositioned = True
+                self.start_moving_immediately()
+            if self.hidden_remaining <= 0:
+                self.retreat_repositioned = False
+                self.start_moving_immediately()
+            return
+        self.spawn_elapsed = min(self.spawn_duration, self.spawn_elapsed + seconds)
+        self.spell_seal_timer -= seconds
+        if self.spell_seal_timer <= 0:
+            self.apply_random_spell_seal(rng)
+            self.spell_seal_timer += self.spell_seal_interval
+        if len(self.sealed_slots) < self.max_sealed_slots:
+            self.seal_timer -= seconds
+            if self.seal_timer <= 0:
+                self.apply_random_seal(rng)
+                self.seal_timer += self.seal_interval
+        else:
+            self.seal_timer = self.seal_interval
+        if self.knockback_active:
+            self._update_knockback(seconds)
+            return
+        self._update_movement(seconds)
+
+    def _update_knockback(self, seconds: float) -> None:
+        self.knockback_elapsed = min(
+            self.knockback_duration,
+            self.knockback_elapsed + seconds,
+        )
+        progress = self.knockback_elapsed / self.knockback_duration
+        eased = 1.0 - (1.0 - progress) ** 3
+        self.x = self.knockback_start_x + (
+            self.knockback_end_x - self.knockback_start_x
+        ) * eased
+        self.y = self.knockback_start_y + (
+            self.knockback_end_y - self.knockback_start_y
+        ) * eased
+        if progress >= 1.0:
+            self.knockback_active = False
+            self.start_moving_immediately()
+
+    def repel(self, distance: float) -> None:
+        dx = self.x - self.target_x
+        dy = self.y - self.target_y
+        current_distance = math.hypot(dx, dy)
+        if current_distance <= 0:
+            dx, dy = 0.0, -1.0
+            current_distance = 1.0
+        self.knockback_start_x = self.x
+        self.knockback_start_y = self.y
+        self.knockback_end_x = self.x + dx / current_distance * distance
+        self.knockback_end_y = self.y + dy / current_distance * distance
+        self.knockback_elapsed = 0.0
+        self.knockback_active = True
+        self.hit_reaction_elapsed = 0.0
+
+    def _update_movement(self, seconds: float) -> None:
+        remaining = seconds
+        while remaining > 0:
+            duration = (
+                self.movement_pause
+                if self.movement_phase == "pause"
+                else self.movement_duration
+            )
+            step = min(remaining, duration - self.movement_elapsed)
+            self.movement_elapsed += step
+            remaining -= step
+            if self.movement_phase == "move":
+                progress = min(1.0, self.movement_elapsed / self.movement_duration)
+                eased = progress * progress * (3.0 - 2.0 * progress)
+                self.x = self.step_start_x + (
+                    self.step_end_x - self.step_start_x
+                ) * eased
+                self.y = self.step_start_y + (
+                    self.step_end_y - self.step_start_y
+                ) * eased
+            if self.movement_elapsed >= duration:
+                self.movement_elapsed = 0.0
+                if self.movement_phase == "pause":
+                    self._begin_movement_step()
+                else:
+                    self.x = self.step_end_x
+                    self.y = self.step_end_y
+                    self.movement_phase = "pause"
+
+    def _begin_movement_step(self) -> None:
+        self.movement_phase = "move"
+        self.step_start_x = self.x
+        self.step_start_y = self.y
+        distance = self.distance_to((self.target_x, self.target_y))
+        if distance <= 0:
+            self.step_end_x = self.x
+            self.step_end_y = self.y
+            return
+        step_distance = min(
+            self.spec.speed * (self.movement_pause + self.movement_duration),
+            distance,
+        )
+        self.step_end_x = self.x + (
+            self.target_x - self.x
+        ) / distance * step_distance
+        self.step_end_y = self.y + (
+            self.target_y - self.y
+        ) / distance * step_distance
+
+    def start_moving_immediately(self) -> None:
+        self.movement_elapsed = 0.0
+        self._begin_movement_step()
+
+    def apply_random_seal(self, rng: random.Random) -> bool:
+        if len(self.sealed_slots) >= self.max_sealed_slots:
+            return False
+        available = [
+            index
+            for index in range(len(self.patterns))
+            if index not in self.sealed_slots
+        ]
+        if not available:
+            return False
+        self.sealed_slots.add(rng.choice(available))
+        return True
+
+    def apply_random_spell_seal(self, rng: random.Random) -> bool:
+        if len(self.sealed_spells) >= self.max_sealed_spells:
+            return False
+        available = [
+            spell.spell_type
+            for spell in SpellManager.SPELLS
+            if spell.spell_type not in self.sealed_spells
+        ]
+        if not available:
+            return False
+        spell_type = rng.choice(available)
+        self.sealed_spells[spell_type] = self.spell_seal_duration
+        return True
+
+    def spell_seal_remaining(self, spell_type: SpellType) -> float:
+        return self.sealed_spells.get(spell_type, 0.0)
+
+    def is_spell_sealed(self, spell_type: SpellType) -> bool:
+        return self.spell_seal_remaining(spell_type) > 0
+
+    def add_row_transition_seal(self, rng: random.Random) -> None:
+        if len(self.sealed_slots) >= self.max_sealed_slots:
+            return
+        available = [
+            index
+            for index in range(len(self.patterns))
+            if index not in self.sealed_slots
+        ]
+        if available:
+            self.sealed_slots.add(rng.choice(available))
+
+    def purify_one(self) -> bool:
+        if not self.sealed_slots:
+            return False
+        was_full = len(self.sealed_slots) >= self.max_sealed_slots
+        self.sealed_slots.remove(min(self.sealed_slots))
+        if was_full:
+            self.seal_timer = self.seal_interval
+        return True
+
+    def hit_pattern(self, entered: PatternAttempt, rng: random.Random) -> str:
+        if not self.is_interactive:
+            return ""
+        matching = [
+            index
+            for index, pattern in enumerate(self.patterns)
+            if index not in self.sealed_slots
+            and pattern_attempt_matches(entered, pattern)
+        ]
+        if not matching:
+            return ""
+        self.hit_reaction_elapsed = 0.0
+        removed_index = matching[0]
+        self.patterns.pop(removed_index)
+        self.sealed_slots = {
+            index - 1 if index > removed_index else index
+            for index in self.sealed_slots
+            if index != removed_index
+        }
+        if self.patterns:
+            return "hit"
+        if self.row_index + 1 >= len(self.rows):
+            self.defeated = True
+            self.fade_remaining = self.fade_duration
+            return "defeated"
+        self.row_index += 1
+        self.patterns = list(self.rows[self.row_index])
+        self.sealed_slots.clear()
+        self.add_row_transition_seal(rng)
+        self.apply_random_spell_seal(rng)
+        return "row"
+
+    def retreat_and_reposition(self, position: tuple[float, float]) -> None:
+        self.pending_x, self.pending_y = position
+        self.hidden_remaining = self.hidden_duration
+        self.retreat_repositioned = False
+        self.knockback_active = False
+        self.movement_phase = "pause"
+        self.movement_elapsed = 0.0
+
 class PatternInput:
     def __init__(self) -> None:
         self.nodes: list[int] = []
@@ -545,7 +867,7 @@ class SpellManager:
             (0, 1, 4, 7, 8),
             45,
             "Clear all gimmicks",
-            10.0,
+            1.0,
         ),
         SpellDefinition(
             SpellType.TRUTH,
@@ -613,6 +935,33 @@ GHOST_SPECS = (
 @dataclass
 class GameSession:
     SPAWN_CLEARANCE = 170.0
+    MAX_WAVES = 3
+    STAGE_ONE_WAVES = {
+        1: (
+            GhostKind.SLOWPOKE,
+            GhostKind.START_LOCKED,
+            GhostKind.SLOWPOKE,
+            GhostKind.START_LOCKED,
+            GhostKind.SLOWPOKE,
+        ),
+        2: (
+            GhostKind.SLOWPOKE,
+            GhostKind.START_LOCKED,
+            GhostKind.CREEP,
+            GhostKind.SLOWPOKE,
+            GhostKind.CREEP,
+            GhostKind.START_LOCKED,
+        ),
+        3: (
+            GhostKind.START_LOCKED,
+            GhostKind.CREEP,
+            GhostKind.FORBIDDEN,
+            GhostKind.SLOWPOKE,
+            GhostKind.CREEP,
+            GhostKind.START_LOCKED,
+            GhostKind.FORBIDDEN,
+        ),
+    }
 
     rng: random.Random = field(default_factory=random.Random)
     max_health: int = 5
@@ -620,6 +969,7 @@ class GameSession:
     score: int = 0
     wave: int = 1
     spawn_queue: Deque[GhostSpec] = field(default_factory=deque)
+    kind_queue: Deque[GhostKind] = field(default_factory=deque)
     ghosts: list[Ghost] = field(default_factory=list)
     spells: SpellManager = field(default_factory=SpellManager)
     last_message: str = ""
@@ -627,12 +977,18 @@ class GameSession:
     last_spell_cast: bool = False
     last_spell_type: Optional[SpellType] = None
     defeated_events: list[tuple[float, float, int]] = field(default_factory=list)
+    wave_required_patterns: list[Pattern] = field(default_factory=list)
+    stage_cleared: bool = False
+    boss: Optional[PitonBoss] = None
+    boss_battle: bool = False
+    boss_last_event: str = ""
 
     def reset(self) -> None:
         self.health = self.max_health
         self.score = 0
         self.wave = 1
         self.spawn_queue.clear()
+        self.kind_queue.clear()
         self.ghosts.clear()
         self.spells = SpellManager()
         self.last_message = ""
@@ -640,12 +996,20 @@ class GameSession:
         self.last_spell_cast = False
         self.last_spell_type = None
         self.defeated_events.clear()
+        self.boss_last_event = ""
+        self.wave_required_patterns.clear()
+        self.stage_cleared = False
+        self.boss = None
+        self.boss_battle = False
+        self.boss_last_event = ""
         self.fill_wave()
 
     def fill_wave(self) -> None:
-        count = 4 + self.wave
-        specs = [self.rng.choice(GHOST_SPECS) for _ in range(count)]
+        kinds = self.STAGE_ONE_WAVES.get(self.wave, ())
+        specs = [self.rng.choice(GHOST_SPECS) for _ in kinds]
         self.spawn_queue.extend(specs)
+        self.kind_queue.extend(kinds)
+        self.wave_required_patterns.clear()
 
     def spawn_next(
         self,
@@ -657,11 +1021,7 @@ class GameSession:
         available_positions = [
             position
             for position in spawn_positions
-            if all(
-                ghost.vanishing
-                or ghost.distance_to(position) >= self.SPAWN_CLEARANCE
-                for ghost in self.ghosts
-            )
+            if self._spawn_position_is_clear(position)
         ]
         if not available_positions:
             for extension in (0.35, 0.7, 1.05, 1.4):
@@ -673,11 +1033,7 @@ class GameSession:
                         player_position[0] + dx * (1.0 + extension),
                         player_position[1] + dy * (1.0 + extension),
                     )
-                    if all(
-                        ghost.vanishing
-                        or ghost.distance_to(candidate) >= self.SPAWN_CLEARANCE
-                        for ghost in self.ghosts
-                    ):
+                    if self._spawn_position_is_clear(candidate):
                         extended_positions.append(candidate)
                 if extended_positions:
                     available_positions = extended_positions
@@ -686,19 +1042,32 @@ class GameSession:
             return None
         spec = self.spawn_queue.popleft()
         x, y = self.rng.choice(available_positions)
-        kind_weights = (
-            (36, 4, 6, 16, 4, 3, 8, 15, 8)
-            if self.wave == 1
-            else (23, 6, 8, 16, 8, 5, 11, 16, 7)
+        planned_spawn = bool(self.kind_queue)
+        kind = (
+            self.kind_queue.popleft()
+            if planned_spawn
+            else self.rng.choices(
+                tuple(GhostKind),
+                weights=(
+                    (36, 4, 6, 16, 4, 3, 8, 15, 8)
+                    if self.wave == 1
+                    else (23, 6, 8, 16, 8, 5, 11, 16, 7)
+                ),
+                k=1,
+            )[0]
         )
-        kind = self.rng.choices(tuple(GhostKind), weights=kind_weights, k=1)[0]
-        pattern_count = self.rng.choices(
-            (1, 2, 3), weights=(65, 30, 5), k=1
-        )[0]
-        if kind is GhostKind.CREEP:
-            pattern_count = max(2, pattern_count)
+        if planned_spawn:
+            pattern_count = self._stage_one_pattern_count(kind)
+            pattern_pool = self._stage_one_pattern_pool(kind)
+        else:
+            pattern_count = self.rng.choices(
+                (1, 2, 3), weights=(65, 30, 5), k=1
+            )[0]
+            if kind is GhostKind.CREEP:
+                pattern_count = max(2, pattern_count)
+            pattern_pool = PATTERN_POOL
         remaining_patterns: list[PatternAttempt] = list(
-            self.rng.sample(PATTERN_POOL, k=pattern_count)
+            self.rng.sample(pattern_pool, k=pattern_count)
         )
         crease_axis = ""
         crease_source_pattern: Pattern = ()
@@ -732,7 +1101,12 @@ class GameSession:
                 for ghost in self.ghosts
                 if ghost.is_interactive and ghost.pattern not in remaining_patterns
             ]
-            candidates = overlapping or [
+            previous_wave_patterns = [
+                pattern
+                for pattern in self.wave_required_patterns
+                if pattern not in remaining_patterns
+            ]
+            candidates = overlapping or previous_wave_patterns or [
                 pattern
                 for pattern in PATTERN_POOL
                 if pattern not in remaining_patterns
@@ -756,15 +1130,200 @@ class GameSession:
         )
         ghost.start_moving_immediately()
         self.ghosts.append(ghost)
+        self.wave_required_patterns.extend(
+            pattern
+            for pattern in remaining_patterns
+            if isinstance(pattern[0], int)
+        )
         return ghost
 
+    def _spawn_position_is_clear(
+        self,
+        position: tuple[float, float],
+    ) -> bool:
+        if not all(
+            ghost.vanishing
+            or ghost.distance_to(position) >= self.SPAWN_CLEARANCE
+            for ghost in self.ghosts
+        ):
+            return False
+        if self.boss is None or self.boss.defeated:
+            return True
+        boss_positions = [(self.boss.x, self.boss.y)]
+        if self.boss.hidden_remaining > 0:
+            boss_positions.append((self.boss.pending_x, self.boss.pending_y))
+        return all(
+            math.dist(position, boss_position) >= self.SPAWN_CLEARANCE
+            for boss_position in boss_positions
+        )
+
+    def _stage_one_pattern_count(self, kind: GhostKind) -> int:
+        if self.wave == 1:
+            return 1
+        if self.wave == 2:
+            return (
+                self.rng.choice((2, 3))
+                if kind is GhostKind.CREEP
+                else self.rng.choice((1, 2))
+            )
+        if self.wave == 3:
+            if kind is GhostKind.CREEP:
+                return 3
+            return 2
+        if kind is GhostKind.CREEP:
+            return self.rng.choice((3, 4))
+        if kind is GhostKind.START_LOCKED:
+            return self.rng.choice((2, 3))
+        return 2
+
+    def _stage_one_pattern_pool(self, kind: GhostKind) -> tuple[Pattern, ...]:
+        short_patterns = tuple(
+            pattern for pattern in PATTERN_POOL if len(pattern) == 3
+        )
+        medium_patterns = tuple(
+            pattern for pattern in PATTERN_POOL if len(pattern) >= 4
+        )
+        if self.wave == 1:
+            return short_patterns
+        if self.wave == 2:
+            return PATTERN_POOL
+        if self.wave == 3:
+            return medium_patterns
+        if kind in (GhostKind.CREEP, GhostKind.START_LOCKED):
+            return COMPLEX_PATTERN_POOL
+        return medium_patterns
+
     def advance_wave_if_clear(self) -> bool:
+        if self.boss_battle:
+            return False
         if self.spawn_queue or self.ghosts:
+            return False
+        if self.wave >= self.MAX_WAVES:
+            self.stage_cleared = True
+            self.last_message = "STAGE CLEAR"
             return False
         self.wave += 1
         self.fill_wave()
         self.last_message = f"WAVE {self.wave}"
         return True
+
+    def start_boss_battle(
+        self,
+        spawn_positions: Sequence[tuple[float, float]],
+        player_position: tuple[float, float],
+    ) -> PitonBoss:
+        self.spawn_queue.clear()
+        self.kind_queue.clear()
+        self.ghosts.clear()
+        boss_spec = GhostSpec(
+            "Piton",
+            COMPLEX_PATTERN_POOL[0],
+            min(spec.speed for spec in GHOST_SPECS) / 1.5,
+            4000,
+            50,
+            (180, 145, 220),
+        )
+        rows = [
+            self.rng.sample(COMPLEX_PATTERN_POOL, k=7)
+            for _ in range(3)
+        ]
+        position = self.rng.choice(tuple(spawn_positions))
+        self.boss = PitonBoss(
+            boss_spec,
+            position[0],
+            position[1],
+            player_position[0],
+            player_position[1],
+            rows,
+        )
+        self.boss_battle = True
+        self.stage_cleared = False
+        self.boss_last_event = ""
+        return self.boss
+
+    def spawn_boss_support(
+        self,
+        spawn_positions: Sequence[tuple[float, float]],
+        player_position: tuple[float, float],
+    ) -> Optional[Ghost]:
+        if not self.boss_battle or self.boss is None or self.boss.defeated:
+            return None
+        if not self.spawn_queue:
+            self.spawn_queue.append(self.rng.choice(GHOST_SPECS[:3]))
+            support_kinds = (
+                (GhostKind.SLOWPOKE,)
+                if self.boss.row_number == 1
+                else (
+                    GhostKind.SLOWPOKE,
+                    GhostKind.START_LOCKED,
+                    GhostKind.CREEP,
+                )
+            )
+            self.kind_queue.append(self.rng.choice(support_kinds))
+        return self.spawn_next(spawn_positions, player_position)
+
+    def update_boss(
+        self,
+        seconds: float,
+        spawn_positions: Sequence[tuple[float, float]],
+        player_position: tuple[float, float],
+        player_radius: float,
+    ) -> int:
+        if self.boss is None:
+            return 0
+        self.boss.update(seconds, self.rng)
+        if (
+            self.boss.is_interactive
+            and self.boss.distance_to(player_position)
+            <= player_radius + self.boss.radius
+        ):
+            self.damage(2)
+            position = self._clear_boss_spawn_position(
+                spawn_positions,
+                player_position,
+            )
+            self.boss.retreat_and_reposition(position)
+            return 2
+        return 0
+
+    def _clear_boss_spawn_position(
+        self,
+        spawn_positions: Sequence[tuple[float, float]],
+        player_position: tuple[float, float],
+    ) -> tuple[float, float]:
+        candidates = [
+            position
+            for position in spawn_positions
+            if all(
+                ghost.vanishing
+                or ghost.distance_to(position) >= self.SPAWN_CLEARANCE
+                for ghost in self.ghosts
+            )
+        ]
+        if candidates:
+            return self.rng.choice(candidates)
+        base_positions = tuple(spawn_positions)
+        for extension in (1.35, 1.7, 2.05, 2.4, 2.8):
+            for position in base_positions:
+                dx = position[0] - player_position[0]
+                dy = position[1] - player_position[1]
+                candidate = (
+                    player_position[0] + dx * extension,
+                    player_position[1] + dy * extension,
+                )
+                if all(
+                    ghost.vanishing
+                    or ghost.distance_to(candidate) >= self.SPAWN_CLEARANCE
+                    for ghost in self.ghosts
+                ):
+                    return candidate
+        position = self.rng.choice(base_positions)
+        dx = position[0] - player_position[0]
+        dy = position[1] - player_position[1]
+        return (
+            player_position[0] + dx * 3.2,
+            player_position[1] + dy * 3.2,
+        )
 
     def update_ghosts(
         self,
@@ -804,6 +1363,13 @@ class GameSession:
 
         spell = None if isinstance(entered[0], tuple) else self.spells.matching_spell(entered)
         if spell is not None:
+            if (
+                self.boss is not None
+                and self.boss_battle
+                and self.boss.is_spell_sealed(spell.spell_type)
+            ):
+                self.last_message = ""
+                return PatternResult.MISSED
             if not self.spells.can_cast(spell):
                 self.last_message = ""
                 return PatternResult.MISSED
@@ -813,13 +1379,28 @@ class GameSession:
             self.last_message = ""
             return PatternResult.SPELL
 
+        boss_result = ""
+        if self.boss is not None and self.boss_battle:
+            boss_result = self.boss.hit_pattern(entered, self.rng)
+            if boss_result:
+                self.last_match_count += 1
+                self.boss_last_event = boss_result
+                if boss_result == "row":
+                    self.score += 700
+                elif boss_result == "defeated":
+                    self.score += self.boss.spec.score
+                    self.spells.gain(self.boss.spec.holy_power)
+                    self.defeated_events.append(
+                        (self.boss.x, self.boss.y, self.boss.spec.holy_power)
+                    )
+
         active_ghosts = [ghost for ghost in self.ghosts if ghost.is_interactive]
-        if not active_ghosts:
+        if not active_ghosts and not boss_result:
             self.last_message = ""
             return PatternResult.MISSED
 
         matched = [ghost for ghost in active_ghosts if ghost.matches_required(entered)]
-        self.last_match_count = len(matched)
+        self.last_match_count += len(matched)
         defeated = 0
         if matched:
             for ghost in matched:
@@ -850,7 +1431,7 @@ class GameSession:
             self.last_message = ""
             return PatternResult.RESONATED
 
-        if matched:
+        if matched or boss_result:
             self.last_message = ""
             return PatternResult.HIT
 
@@ -894,7 +1475,7 @@ class GameSession:
     def _position_is_clear_for_creep(
         self, ghost: Ghost, candidate: tuple[float, float]
     ) -> bool:
-        return all(
+        ghosts_are_clear = all(
             other is ghost
             or other.vanishing
             or other.hidden_remaining > 0
@@ -902,6 +1483,12 @@ class GameSession:
             >= self.SPAWN_CLEARANCE
             for other in self.ghosts
         )
+        boss_is_clear = (
+            self.boss is None
+            or self.boss.defeated
+            or self.boss.distance_to(candidate) >= self.SPAWN_CLEARANCE
+        )
+        return ghosts_are_clear and boss_is_clear
 
     def _cast_spell(self, spell: SpellDefinition) -> None:
         active_ghosts = [ghost for ghost in self.ghosts if ghost.is_interactive]
@@ -920,8 +1507,20 @@ class GameSession:
                 ):
                     ghost.repel(self.spells.REPEL_DISTANCE)
                     ghost.slow_remaining = self.spells.REPEL_SLOW_DURATION
+            if (
+                self.boss is not None
+                and self.boss_battle
+                and self.boss.is_interactive
+                and self.boss.distance_to(
+                    (self.boss.target_x, self.boss.target_y)
+                )
+                <= self.spells.REPEL_RADIUS
+            ):
+                self.boss.repel(self.spells.REPEL_DISTANCE)
         elif spell.spell_type is SpellType.NULLIFY:
             self.spells.spend(spell)
+            if self.boss is not None and self.boss_battle:
+                self.boss.purify_one()
             for ghost in active_ghosts:
                 ghost.nullify_gimmick()
         elif spell.spell_type is SpellType.TRUTH:
