@@ -3,6 +3,9 @@ from __future__ import annotations
 import math
 from pathlib import Path
 import random
+import shutil
+import subprocess
+import time
 
 try:
     import pygame
@@ -20,6 +23,7 @@ from core import (
     SpellManager,
     SpellType,
     mirrored_pattern,
+    patterns_match,
 )
 
 
@@ -75,9 +79,107 @@ class Button:
         )
 
 
+class VideoPlayer:
+    def __init__(
+        self,
+        path: Path,
+        size: tuple[int, int],
+        fps: float = 30.0,
+        duration: float = 10.0,
+    ) -> None:
+        self.size = size
+        self.fps = fps
+        self.total_frames = round(fps * duration)
+        self.frame_size = size[0] * size[1] * 3
+        self.frame_index = 0
+        self.elapsed = 0.0
+        self.started_at: float | None = None
+        self.ended = False
+        self.surface: pygame.Surface | None = None
+        self.process: subprocess.Popen[bytes] | None = None
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg is None or not path.exists():
+            self.ended = True
+            return
+        command = [
+            ffmpeg,
+            "-loglevel",
+            "error",
+            "-i",
+            str(path),
+            "-an",
+            "-vf",
+            f"scale={size[0]}:{size[1]}:force_original_aspect_ratio=increase,"
+            f"crop={size[0]}:{size[1]}",
+            "-pix_fmt",
+            "rgb24",
+            "-f",
+            "rawvideo",
+            "-",
+        ]
+        startup_info = None
+        creation_flags = 0
+        if hasattr(subprocess, "STARTUPINFO"):
+            startup_info = subprocess.STARTUPINFO()
+            startup_info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        self.process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            startupinfo=startup_info,
+            creationflags=creation_flags,
+        )
+        self._read_next_frame()
+
+    def update(self, seconds: float) -> None:
+        if self.ended:
+            return
+        if self.started_at is None:
+            self.elapsed += seconds
+        else:
+            self.elapsed = time.perf_counter() - self.started_at
+        target_frame = min(
+            self.total_frames - 1,
+            int(self.elapsed * self.fps),
+        )
+        while self.frame_index <= target_frame and not self.ended:
+            self._read_next_frame()
+        if self.frame_index >= self.total_frames:
+            self.ended = True
+            self.close()
+
+    def sync_start(self) -> None:
+        self.elapsed = 0.0
+        self.started_at = time.perf_counter()
+
+    def _read_next_frame(self) -> None:
+        if self.process is None or self.process.stdout is None:
+            self.ended = True
+            return
+        data = self.process.stdout.read(self.frame_size)
+        if len(data) != self.frame_size:
+            self.ended = True
+            self.close()
+            return
+        self.surface = pygame.image.frombuffer(
+            data, self.size, "RGB"
+        ).copy()
+        self.frame_index += 1
+
+    def close(self) -> None:
+        if self.process is None:
+            return
+        if self.process.poll() is None:
+            self.process.terminate()
+        self.process = None
+
+
 class ExorcismGame:
     def __init__(self) -> None:
         pygame.init()
+        pygame.mixer.set_num_channels(24)
+        pygame.mixer.set_reserved(1)
         pygame.display.set_caption("Exocism")
         self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
         self.clock = pygame.time.Clock()
@@ -85,7 +187,13 @@ class ExorcismGame:
         self.font = pygame.font.Font(None, 32)
         self.font_large = pygame.font.Font(None, 54)
         self.font_title = pygame.font.Font(None, 92)
-        self.state = "start"
+        dialogue_font_path = (
+            pygame.font.match_font("malgungothic")
+            or pygame.font.match_font("nanumgothic")
+            or pygame.font.match_font("notosanscjkkr")
+        )
+        self.dialogue_font = pygame.font.Font(dialogue_font_path, 30)
+        self.state = "tutorial"
         self.running = True
         self.session = GameSession(rng=random.Random())
         self.pattern_input = PatternInput()
@@ -111,15 +219,164 @@ class ExorcismGame:
         self.spell_panel_hover_grace = 0.0
         self.reward_orbs: list[dict[str, object]] = []
         self.player_images = self._load_player_images()
+        self.player_attack_image = self._load_scaled_image(
+            "peter_attack1.png",
+            145,
+        )
+        self.player_attack_timer = 0.0
+        self.player_attack_duration = 0.65
         self.ghost_images = self._load_ghost_images()
+        self.stage_background = self._load_cover_image("stage1.png")
         self.pending_shift_pattern: tuple[int, ...] = ()
         self.input_shift_layer = False
         self.input_shift_cancelled = False
+        self.grid_intro_elapsed = 0.0
+        self.grid_intro_duration = 1.05
         self.start_button = Button(pygame.Rect(490, 465, 220, 64), "START")
         self.retry_button = Button(pygame.Rect(490, 480, 220, 64), "RETRY")
         self.resume_button = Button(pygame.Rect(490, 330, 220, 64), "RESUME")
         self.pause_restart_button = Button(pygame.Rect(490, 410, 220, 64), "RESTART")
         self.node_positions = self._make_grid_positions()
+        self.tutorial_pattern = (3, 4, 5)
+        self.tutorial_reveal_elapsed = 0.0
+        self.tutorial_reveal_duration = 1.05
+        self.tutorial_success_elapsed = 0.0
+        self.tutorial_success_duration = 1.2
+        self.tutorial_success_active = False
+        self.tutorial_video = VideoPlayer(
+            Path(__file__).with_name("exorcism_sceen1.mp4"),
+            (WIDTH, HEIGHT),
+        )
+        self.tutorial_video_sound = self._load_tutorial_video_sound(
+            Path(__file__).with_name("exorcism_sceen1.mp4")
+        )
+        self.tutorial_video_channel: pygame.mixer.Channel | None = None
+        self.magic_spell_sound = self._load_audio_sound(
+            Path(__file__).with_name("magic_spell.mp3"),
+            volume_gain=1.0,
+        )
+        self.magic_spell_channel = pygame.mixer.Channel(0)
+        self.story_video: VideoPlayer | None = None
+        self.story_video_sound: pygame.mixer.Sound | None = None
+        self.story_video_channel: pygame.mixer.Channel | None = None
+        self.story_music_path = Path(__file__).with_name("intro_atmosphere.mp3")
+        self.story_music_sound = self._load_audio_sound(
+            self.story_music_path,
+            volume_gain=3.0,
+            start_seconds=8.0,
+        )
+        self.story_music_channel: pygame.mixer.Channel | None = None
+        self.story_dialogue_lines = (
+            "...기운이 깊다. 이곳인가.",
+            "의뢰인은 이 저택에서 사라진 가족의 목소리를 들었다고 했지.",
+            "그 목소리의 근원... 확인해야겠군",
+        )
+        self.story_dialogue_index = 0
+        self.story_dialogue_elapsed = 0.0
+        self.story_dialogue_fade_duration = 0.24
+        self.story_dialogue_typing_elapsed = 0.0
+        self.story_dialogue_visible_characters = 0
+        self.story_dialogue_spoken_pairs = 0
+        self.story_dialogue_character_delay = 0.035
+        self.story_dialogue_character_rise_duration = 0.12
+        self.story_prompt_elapsed = 0.0
+        self.story_prompt_fade_duration = 0.28
+        self.story_dialogue_active = False
+        self.story_dialogue_phase = "fade_in"
+        self.story_transition_elapsed = 0.0
+        self.story_transition_duration = 1.8
+        self.story_game_ready = False
+        self.peter_speak_sound = self._load_sound("peter_speak.wav")
+        if self.peter_speak_sound is not None:
+            self.peter_speak_sound.set_volume(0.42)
+        self.boo_sounds = [
+            sound
+            for filename in ("boo1.mp3", "boo2.mp3", "boo3.mp3")
+            if (sound := self._load_sound(filename)) is not None
+        ]
+        for sound in self.boo_sounds:
+            sound.set_volume(0.72)
+        self.ghost_defeated_sound = self._load_sound("ghost_defeated.mp3")
+        if self.ghost_defeated_sound is not None:
+            self.ghost_defeated_sound.set_volume(0.85)
+        self.ghost_boo_channels: dict[int, pygame.mixer.Channel] = {}
+        self._start_tutorial_audio()
+
+    def _load_sound(self, filename: str) -> pygame.mixer.Sound | None:
+        sound_path = Path(__file__).with_name(filename)
+        if not sound_path.exists():
+            return None
+        try:
+            return pygame.mixer.Sound(str(sound_path))
+        except pygame.error:
+            return None
+
+    def _load_tutorial_video_sound(
+        self, video_path: Path
+    ) -> pygame.mixer.Sound | None:
+        return self._load_audio_sound(video_path)
+
+    def _load_audio_sound(
+        self,
+        audio_path: Path,
+        volume_gain: float = 1.0,
+        start_seconds: float = 0.0,
+    ) -> pygame.mixer.Sound | None:
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg is None or not audio_path.exists():
+            return None
+        command = [
+            ffmpeg,
+            "-loglevel",
+            "error",
+        ]
+        if start_seconds > 0.0:
+            command.extend(["-ss", str(start_seconds)])
+        command.extend([
+            "-i",
+            str(audio_path),
+            "-vn",
+        ])
+        if volume_gain != 1.0:
+            command.extend(["-af", f"volume={volume_gain}"])
+        command.extend([
+            "-f",
+            "s16le",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            "44100",
+            "-ac",
+            "2",
+            "-",
+        ])
+        startup_info = None
+        creation_flags = 0
+        if hasattr(subprocess, "STARTUPINFO"):
+            startup_info = subprocess.STARTUPINFO()
+            startup_info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                check=True,
+                startupinfo=startup_info,
+                creationflags=creation_flags,
+            )
+            return pygame.mixer.Sound(buffer=result.stdout)
+        except (OSError, subprocess.CalledProcessError, pygame.error):
+            return None
+
+    def _start_tutorial_audio(self) -> None:
+        if self.tutorial_video_sound is not None:
+            self.tutorial_video_channel = self.tutorial_video_sound.play()
+        self.tutorial_video.sync_start()
+        if self.story_music_sound is not None:
+            self.story_music_channel = self.story_music_sound.play(loops=-1)
+            if self.story_music_channel is not None:
+                self.story_music_channel.set_volume(0.2)
 
     def _load_player_images(self) -> list[pygame.Surface]:
         frames = [
@@ -138,6 +395,25 @@ class ExorcismGame:
         image = pygame.image.load(image_path).convert_alpha()
         height = round(image.get_height() * width / image.get_width())
         return pygame.transform.smoothscale(image, (width, height))
+
+    def _load_cover_image(self, filename: str) -> pygame.Surface | None:
+        image_path = Path(__file__).with_name(filename)
+        if not image_path.exists():
+            return None
+        image = pygame.image.load(image_path).convert()
+        scale = max(WIDTH / image.get_width(), HEIGHT / image.get_height())
+        size = (
+            round(image.get_width() * scale),
+            round(image.get_height() * scale),
+        )
+        scaled = pygame.transform.smoothscale(image, size)
+        source = pygame.Rect(
+            (scaled.get_width() - WIDTH) // 2,
+            (scaled.get_height() - HEIGHT) // 2,
+            WIDTH,
+            HEIGHT,
+        )
+        return scaled.subsurface(source).copy()
 
     def _load_ghost_images(self) -> dict[object, dict[str, pygame.Surface]]:
         images: dict[object, dict[str, pygame.Surface]] = {}
@@ -178,9 +454,22 @@ class ExorcismGame:
             self._update(seconds)
             self._draw()
             pygame.display.flip()
+        self.tutorial_video.close()
+        if self.story_video is not None:
+            self.story_video.close()
+        if self.tutorial_video_channel is not None:
+            self.tutorial_video_channel.stop()
+        if self.story_video_channel is not None:
+            self.story_video_channel.stop()
+        if self.story_music_channel is not None:
+            self.story_music_channel.stop()
+        if self.magic_spell_channel is not None:
+            self.magic_spell_channel.stop()
+        self._stop_all_ghost_boo()
         pygame.quit()
 
     def _start_game(self) -> None:
+        self._stop_all_ghost_boo()
         self.session.reset()
         self.pattern_input.clear()
         self.last_drag_position = None
@@ -189,12 +478,14 @@ class ExorcismGame:
         self.pending_shift_pattern = ()
         self.input_shift_layer = False
         self.input_shift_cancelled = False
+        self.grid_intro_elapsed = 0.0
         self.spell_pattern = ()
         self.spell_timer = 0.0
         self.spell_panel_progress = 0.0
         self.spell_panel_hover_grace = 0.0
         self.reward_orbs.clear()
-        self.spawn_timer = 0.5
+        self.player_attack_timer = 0.0
+        self.spawn_timer = self.grid_intro_duration + 0.25
         self.message_timer = 0.0
         self.state = "playing"
 
@@ -218,6 +509,10 @@ class ExorcismGame:
                     pygame.K_SPACE,
                 ):
                     self._start_game()
+            elif self.state == "tutorial":
+                self._handle_tutorial_event(event)
+            elif self.state == "story":
+                self._handle_story_event(event)
             elif self.state == "gameover":
                 if self.retry_button.clicked(event):
                     self._start_game()
@@ -243,6 +538,114 @@ class ExorcismGame:
                 ):
                     self._resume_game()
 
+    def _handle_tutorial_event(self, event: pygame.event.Event) -> None:
+        if (
+            not self.tutorial_video.ended
+            or self.tutorial_reveal_elapsed < self.tutorial_reveal_duration
+            or self.tutorial_success_active
+        ):
+            return
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            node = self._node_at(event.pos)
+            if node is not None:
+                self.pattern_input.begin(node)
+                self.last_drag_position = event.pos
+        elif event.type == pygame.MOUSEMOTION and self.pattern_input.dragging:
+            self._add_nodes_along_segment(
+                self.last_drag_position or event.pos, event.pos
+            )
+            self.last_drag_position = event.pos
+        elif (
+            event.type == pygame.MOUSEBUTTONUP
+            and event.button == 1
+            and self.pattern_input.dragging
+        ):
+            self._add_nodes_along_segment(
+                self.last_drag_position or event.pos, event.pos
+            )
+            pattern = self.pattern_input.finish()
+            self.last_drag_position = None
+            if patterns_match(pattern, self.tutorial_pattern):
+                self._start_tutorial_success()
+
+    def _start_tutorial_success(self) -> None:
+        if self.tutorial_success_active:
+            return
+        self.tutorial_success_active = True
+        self.tutorial_success_elapsed = 0.0
+        self.pattern_input.clear()
+        self._play_magic_spell_sound()
+
+    def _finish_tutorial(self) -> None:
+        if self.tutorial_video_channel is not None:
+            self.tutorial_video_channel.stop()
+            self.tutorial_video_channel = None
+        if self.magic_spell_channel is not None:
+            self.magic_spell_channel.stop()
+        self.tutorial_video.close()
+        self._start_story_scene()
+
+    def _start_story_scene(self) -> None:
+        self.state = "story"
+        self.story_dialogue_index = 0
+        self.story_dialogue_elapsed = 0.0
+        self.story_dialogue_typing_elapsed = 0.0
+        self.story_dialogue_visible_characters = 0
+        self.story_dialogue_spoken_pairs = 0
+        self.story_prompt_elapsed = 0.0
+        self.story_dialogue_active = False
+        self.story_dialogue_phase = "fade_in"
+        self.story_transition_elapsed = 0.0
+        self.story_game_ready = False
+        story_path = Path(__file__).with_name("exorcism_sceen2.mp4")
+        self.story_video = VideoPlayer(
+            story_path,
+            (WIDTH, HEIGHT),
+            duration=5.92,
+        )
+        self.story_video_sound = self._load_tutorial_video_sound(story_path)
+        if self.story_video_sound is not None:
+            self.story_video_channel = self.story_video_sound.play()
+            if self.story_video_channel is not None:
+                self.story_video_channel.set_volume(0.72)
+        if self.story_video is not None:
+            self.story_video.sync_start()
+
+    def _handle_story_event(self, event: pygame.event.Event) -> None:
+        if (
+            not self.story_dialogue_active
+            or self.story_dialogue_phase != "hold"
+        ):
+            return
+        advance = (
+            event.type == pygame.MOUSEBUTTONDOWN
+            and event.button == 1
+        ) or (
+            event.type == pygame.KEYDOWN
+            and event.key in (pygame.K_RETURN, pygame.K_SPACE)
+        )
+        if not advance:
+            return
+        self.story_dialogue_phase = "fade_out"
+        self.story_dialogue_elapsed = 0.0
+
+    def _start_story_transition(self) -> None:
+        self.state = "story_transition"
+        self.story_transition_elapsed = 0.0
+        self.story_game_ready = False
+        if self.story_video_channel is not None:
+            self.story_video_channel.stop()
+            self.story_video_channel = None
+        if self.story_video is not None:
+            self.story_video.close()
+
+    def _prepare_game_after_story(self) -> None:
+        self._start_game()
+        self.grid_intro_elapsed = self.grid_intro_duration
+        self.spawn_timer = 0.35
+        self.state = "story_transition"
+        self.story_game_ready = True
+
     def _pause_game(self) -> None:
         self.pattern_input.clear()
         self.last_drag_position = None
@@ -260,6 +663,8 @@ class ExorcismGame:
         self.state = "playing"
 
     def _handle_pattern_event(self, event: pygame.event.Event) -> None:
+        if self.grid_intro_elapsed < self.grid_intro_duration:
+            return
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             node = self._node_at(event.pos)
             if node is not None:
@@ -305,10 +710,22 @@ class ExorcismGame:
     def _submit_pattern(
         self, pattern: tuple[int, ...] | tuple[tuple[int, ...], tuple[int, ...]]
     ) -> PatternResult:
+        previously_vanishing = {
+            id(ghost) for ghost in self.session.ghosts if ghost.vanishing
+        }
         result = self.session.judge_pattern(pattern)
+        defeated_ghosts = [
+            ghost
+            for ghost in self.session.ghosts
+            if ghost.vanishing and id(ghost) not in previously_vanishing
+        ]
+        for ghost in defeated_ghosts:
+            self._play_ghost_defeated_sound(ghost)
         if self.session.last_match_count or self.session.last_spell_cast:
             self.success_pattern = pattern if pattern and isinstance(pattern[0], int) else ()
             self.success_timer = self.success_duration
+            self.player_attack_timer = self.player_attack_duration
+            self._play_magic_spell_sound()
         if self.session.last_spell_cast:
             self.spell_pattern = pattern
             self.spell_timer = self.spell_duration
@@ -324,6 +741,39 @@ class ExorcismGame:
         self.message_timer = 0.0
         self._set_result_flash(result)
         return result
+
+    def _play_magic_spell_sound(self) -> None:
+        if self.magic_spell_sound is not None:
+            self.magic_spell_channel.play(self.magic_spell_sound)
+
+    def _play_ghost_spawn_sound(self, ghost: Ghost) -> None:
+        if not self.boo_sounds:
+            return
+        channel = random.choice(self.boo_sounds).play()
+        if channel is not None:
+            self.ghost_boo_channels[id(ghost)] = channel
+
+    def _play_ghost_defeated_sound(self, ghost: Ghost) -> None:
+        channel = self.ghost_boo_channels.pop(id(ghost), None)
+        if channel is not None:
+            channel.stop()
+            if self.ghost_defeated_sound is not None:
+                channel.play(self.ghost_defeated_sound)
+        elif self.ghost_defeated_sound is not None:
+            self.ghost_defeated_sound.play()
+
+    def _stop_all_ghost_boo(self) -> None:
+        for channel in self.ghost_boo_channels.values():
+            channel.stop()
+        self.ghost_boo_channels.clear()
+
+    def _remove_inactive_ghost_boo_channels(self) -> None:
+        active_ids = {id(ghost) for ghost in self.session.ghosts}
+        for ghost_id, channel in list(self.ghost_boo_channels.items()):
+            if ghost_id not in active_ids or not channel.get_busy():
+                if ghost_id not in active_ids:
+                    channel.stop()
+                self.ghost_boo_channels.pop(ghost_id, None)
 
     def _node_at(self, position: tuple[int, int]) -> int | None:
         for index, node_position in enumerate(self.node_positions):
@@ -365,6 +815,15 @@ class ExorcismGame:
         self.flash_timer = 0.22 if self.flash_color else 0.0
 
     def _update(self, seconds: float) -> None:
+        if self.state == "tutorial":
+            self._update_tutorial(seconds)
+            return
+        if self.state == "story":
+            self._update_story(seconds)
+            return
+        if self.state == "story_transition":
+            self._update_story_transition(seconds)
+            return
         if self.state != "playing":
             return
 
@@ -375,7 +834,12 @@ class ExorcismGame:
             and self.session.spawn_queue
             and len(self.session.ghosts) < active_limit
         ):
+            existing_ghost_ids = {id(ghost) for ghost in self.session.ghosts}
             spawned = self.session.spawn_next(SPAWN_POSITIONS, PLAYER_POSITION)
+            if spawned:
+                for ghost in self.session.ghosts:
+                    if id(ghost) not in existing_ghost_ids:
+                        self._play_ghost_spawn_sound(ghost)
             self.spawn_timer = (
                 max(0.75, 2.15 - self.session.wave * 0.1)
                 if spawned
@@ -385,6 +849,7 @@ class ExorcismGame:
         escaped = self.session.update_ghosts(
             seconds, PLAYER_POSITION, PLAYER_RADIUS
         )
+        self._remove_inactive_ghost_boo_channels()
         if escaped:
             self.message_timer = 1.8
             self.flash_color = RED
@@ -402,11 +867,130 @@ class ExorcismGame:
         self.flash_timer = max(0.0, self.flash_timer - seconds)
         self.success_timer = max(0.0, self.success_timer - seconds)
         self.spell_timer = max(0.0, self.spell_timer - seconds)
+        self.player_attack_timer = max(
+            0.0,
+            self.player_attack_timer - seconds,
+        )
+        self.grid_intro_elapsed = min(
+            self.grid_intro_duration,
+            self.grid_intro_elapsed + seconds,
+        )
         self._update_spell_panel(seconds)
         for orb in list(self.reward_orbs):
             orb["elapsed"] = float(orb["elapsed"]) + seconds
             if float(orb["elapsed"]) >= float(orb["duration"]):
                 self.reward_orbs.remove(orb)
+
+    def _update_tutorial(self, seconds: float) -> None:
+        self.tutorial_video.update(seconds)
+        if self.tutorial_video.ended:
+            if self.tutorial_video_channel is not None:
+                self.tutorial_video_channel.stop()
+                self.tutorial_video_channel = None
+            self.tutorial_reveal_elapsed = min(
+                self.tutorial_reveal_duration,
+                self.tutorial_reveal_elapsed + seconds,
+            )
+        if self.tutorial_success_active:
+            self.tutorial_success_elapsed = min(
+                self.tutorial_success_duration,
+                self.tutorial_success_elapsed + seconds,
+            )
+            if self.tutorial_success_elapsed >= self.tutorial_success_duration:
+                self._finish_tutorial()
+
+    def _update_story(self, seconds: float) -> None:
+        if self.story_video is None:
+            self._activate_story_dialogue()
+        else:
+            self.story_video.update(seconds)
+            if self.story_video.ended:
+                if self.story_video_channel is not None:
+                    self.story_video_channel.stop()
+                    self.story_video_channel = None
+                self._activate_story_dialogue()
+        if not self.story_dialogue_active:
+            return
+        if self.story_dialogue_phase == "fade_in":
+            self.story_dialogue_elapsed = min(
+                self.story_dialogue_fade_duration,
+                self.story_dialogue_elapsed + seconds,
+            )
+            if self.story_dialogue_elapsed >= self.story_dialogue_fade_duration:
+                self.story_dialogue_phase = "typing"
+                self.story_dialogue_typing_elapsed = 0.0
+                self.story_dialogue_visible_characters = 0
+                self.story_dialogue_spoken_pairs = 0
+        elif self.story_dialogue_phase == "typing":
+            self.story_dialogue_typing_elapsed += seconds
+            line = self.story_dialogue_lines[self.story_dialogue_index]
+            visible_characters = min(
+                len(line),
+                int(
+                    self.story_dialogue_typing_elapsed
+                    / self.story_dialogue_character_delay
+                )
+                + 1,
+            )
+            spoken_pairs = visible_characters // 2
+            for _ in range(self.story_dialogue_spoken_pairs, spoken_pairs):
+                if self.peter_speak_sound is not None:
+                    self.peter_speak_sound.play()
+            self.story_dialogue_visible_characters = visible_characters
+            self.story_dialogue_spoken_pairs = spoken_pairs
+            typing_duration = (
+                max(0, len(line) - 1) * self.story_dialogue_character_delay
+                + self.story_dialogue_character_rise_duration
+            )
+            if self.story_dialogue_typing_elapsed >= typing_duration:
+                self.story_dialogue_phase = "hold"
+                self.story_prompt_elapsed = 0.0
+        elif self.story_dialogue_phase == "hold":
+            self.story_prompt_elapsed = min(
+                self.story_prompt_fade_duration,
+                self.story_prompt_elapsed + seconds,
+            )
+        elif self.story_dialogue_phase == "fade_out":
+            self.story_dialogue_elapsed = min(
+                self.story_dialogue_fade_duration,
+                self.story_dialogue_elapsed + seconds,
+            )
+            if self.story_dialogue_elapsed >= self.story_dialogue_fade_duration:
+                if self.story_dialogue_index < len(self.story_dialogue_lines) - 1:
+                    self.story_dialogue_index += 1
+                    self.story_dialogue_phase = "fade_in"
+                    self.story_dialogue_elapsed = 0.0
+                    self.story_dialogue_typing_elapsed = 0.0
+                    self.story_dialogue_visible_characters = 0
+                    self.story_dialogue_spoken_pairs = 0
+                    self.story_prompt_elapsed = 0.0
+                else:
+                    self._start_story_transition()
+
+    def _activate_story_dialogue(self) -> None:
+        if self.story_dialogue_active:
+            return
+        self.story_dialogue_active = True
+        self.story_dialogue_phase = "fade_in"
+        self.story_dialogue_elapsed = 0.0
+        self.story_dialogue_typing_elapsed = 0.0
+        self.story_dialogue_visible_characters = 0
+        self.story_dialogue_spoken_pairs = 0
+        self.story_prompt_elapsed = 0.0
+
+    def _update_story_transition(self, seconds: float) -> None:
+        self.story_transition_elapsed = min(
+            self.story_transition_duration,
+            self.story_transition_elapsed + seconds,
+        )
+        midpoint = self.story_transition_duration / 2.0
+        if (
+            not self.story_game_ready
+            and self.story_transition_elapsed >= midpoint
+        ):
+            self._prepare_game_after_story()
+        if self.story_transition_elapsed >= self.story_transition_duration:
+            self.state = "playing"
 
     def _spell_panel_rect(self) -> pygame.Rect:
         eased = 1.0 - (1.0 - self.spell_panel_progress) ** 3
@@ -453,12 +1037,272 @@ class ExorcismGame:
         self._draw_background()
         if self.state == "start":
             self._draw_start()
+        elif self.state == "tutorial":
+            self._draw_tutorial()
+        elif self.state == "story":
+            self._draw_story()
+        elif self.state == "story_transition":
+            self._draw_story_transition()
         elif self.state == "playing":
             self._draw_playing()
         elif self.state == "paused":
             self._draw_paused()
         else:
             self._draw_gameover()
+
+    def _draw_story(self) -> None:
+        if self.story_video is not None and self.story_video.surface is not None:
+            self.screen.blit(self.story_video.surface, (0, 0))
+        else:
+            self.screen.fill(BG)
+            self._draw_background()
+        if not self.story_dialogue_active:
+            return
+
+        progress = min(
+            1.0,
+            self.story_dialogue_elapsed / self.story_dialogue_fade_duration,
+        )
+        smooth = progress * progress * (3.0 - 2.0 * progress)
+        visibility = 1.0 - smooth if self.story_dialogue_phase == "fade_out" else smooth
+        if self.story_dialogue_phase == "hold":
+            visibility = 1.0
+        text_alpha = round(255 * visibility)
+        panel_visibility = (
+            visibility
+            if self.story_dialogue_index == 0
+            and self.story_dialogue_phase == "fade_in"
+            else 1.0
+        )
+        panel_alpha = round(255 * panel_visibility)
+        panel = pygame.Surface((WIDTH - 150, 148), pygame.SRCALPHA)
+        pygame.draw.rect(
+            panel,
+            (7, 9, 18, round(panel_alpha * 0.88)),
+            panel.get_rect(),
+            border_radius=18,
+        )
+        pygame.draw.rect(
+            panel,
+            (171, 190, 214, round(panel_alpha * 0.42)),
+            panel.get_rect(),
+            2,
+            border_radius=18,
+        )
+        pygame.draw.rect(
+            panel,
+            (*GOLD, round(panel_alpha * 0.9)),
+            pygame.Rect(0, 0, 6, panel.get_height()),
+            border_top_left_radius=18,
+            border_bottom_left_radius=18,
+        )
+        speaker = self.font_small.render("PETER", True, GOLD)
+        speaker.set_alpha(panel_alpha)
+        panel.blit(speaker, (34, 19))
+        pygame.draw.line(
+            panel,
+            (171, 190, 214, round(panel_alpha * 0.3)),
+            (34, 49),
+            (panel.get_width() - 34, 49),
+            1,
+        )
+        line = self.story_dialogue_lines[self.story_dialogue_index]
+        text_x = 34
+        text_y = 66
+        for index, character in enumerate(line):
+            character_surface = self.dialogue_font.render(
+                character,
+                True,
+                WHITE,
+            )
+            if self.story_dialogue_phase == "fade_in":
+                character_progress = 0.0
+            elif self.story_dialogue_phase == "typing":
+                character_progress = max(
+                    0.0,
+                    min(
+                        1.0,
+                        (
+                            self.story_dialogue_typing_elapsed
+                            - index * self.story_dialogue_character_delay
+                        )
+                        / self.story_dialogue_character_rise_duration,
+                    ),
+                )
+            else:
+                character_progress = 1.0
+            character_eased = 1.0 - (1.0 - character_progress) ** 3
+            character_surface.set_alpha(round(text_alpha * character_eased))
+            rise = round((1.0 - character_eased) * 10)
+            panel.blit(character_surface, (text_x, text_y + rise))
+            text_x += character_surface.get_width()
+        prompt = self.font_small.render("CLICK / ENTER", True, MUTED)
+        prompt_progress = (
+            min(
+                1.0,
+                self.story_prompt_elapsed / self.story_prompt_fade_duration,
+            )
+            if self.story_dialogue_phase == "hold"
+            else 0.0
+        )
+        prompt_eased = 1.0 - (1.0 - prompt_progress) ** 3
+        prompt_alpha = round(text_alpha * 0.78 * prompt_eased)
+        prompt.set_alpha(prompt_alpha)
+        prompt_rect = prompt.get_rect(
+            bottomright=(panel.get_width() - 28, 128)
+        )
+        prompt_rect.y += round((1.0 - prompt_eased) * 6)
+        panel.blit(
+            prompt,
+            prompt_rect,
+        )
+        panel.set_alpha(panel_alpha)
+        y_offset = round((1.0 - panel_visibility) * 8)
+        self.screen.blit(panel, (75, HEIGHT - 178 + y_offset))
+
+    def _draw_story_transition(self) -> None:
+        midpoint = self.story_transition_duration / 2.0
+        if self.story_game_ready:
+            self._draw_playing()
+            fade = max(
+                0.0,
+                1.0
+                - (self.story_transition_elapsed - midpoint) / midpoint,
+            )
+        else:
+            self._draw_story()
+            fade = min(1.0, self.story_transition_elapsed / midpoint)
+        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, round(255 * fade)))
+        self.screen.blit(overlay, (0, 0))
+
+    def _draw_tutorial(self) -> None:
+        if self.tutorial_video.surface is not None:
+            self.screen.blit(self.tutorial_video.surface, (0, 0))
+        else:
+            self.screen.fill(BG)
+            self._draw_background()
+        if not self.tutorial_video.ended:
+            return
+
+        progress = min(
+            1.0,
+            self.tutorial_reveal_elapsed / self.tutorial_reveal_duration,
+        )
+        eased = progress * progress * progress * (
+            progress * (progress * 6.0 - 15.0) + 10.0
+        )
+        alpha = round(255 * eased)
+        self._draw_tutorial_target(alpha)
+        self._draw_tutorial_grid(eased, alpha)
+        if self.tutorial_success_active:
+            self._draw_tutorial_success()
+
+    def _draw_tutorial_success(self) -> None:
+        progress = min(
+            1.0,
+            self.tutorial_success_elapsed / self.tutorial_success_duration,
+        )
+        eased = 1.0 - (1.0 - progress) ** 3
+        fade = (
+            progress / 0.28
+            if progress < 0.28
+            else max(0.0, (1.0 - progress) / 0.72)
+        )
+        alpha = round(255 * min(1.0, fade))
+        gap = round(32 + eased * 125)
+        layer = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        self._draw_pattern_on_surface(
+            layer,
+            self.tutorial_pattern,
+            GRID_CENTER,
+            gap,
+            (*GOLD, alpha),
+            9,
+        )
+        glow = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        pygame.draw.circle(
+            glow,
+            (*GOLD, alpha // 8),
+            GRID_CENTER,
+            round(70 + eased * 180),
+        )
+        self.screen.blit(glow, (0, 0))
+        self.screen.blit(layer, (0, 0))
+
+    def _draw_tutorial_target(self, alpha: int) -> None:
+        layer = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        center = (WIDTH // 2, 145)
+        card = pygame.Rect(center[0] - 78, center[1] - 42, 156, 84)
+        pygame.draw.rect(layer, (10, 12, 24, alpha // 2), card, border_radius=12)
+        pygame.draw.rect(layer, (*PATTERN_COLOR, alpha // 2), card, 2, border_radius=12)
+        nodes = [
+            (
+                center[0] + (index % 3 - 1) * 25,
+                center[1] + (index // 3 - 1) * 25,
+            )
+            for index in range(9)
+        ]
+        for first, second in zip(
+            self.tutorial_pattern, self.tutorial_pattern[1:]
+        ):
+            pygame.draw.line(
+                layer,
+                (*PATTERN_COLOR, alpha),
+                nodes[first],
+                nodes[second],
+                7,
+            )
+        for node in self.tutorial_pattern:
+            pygame.draw.circle(
+                layer, (*PATTERN_COLOR, alpha), nodes[node], 5
+            )
+        self.screen.blit(layer, (0, 0))
+
+    def _draw_tutorial_grid(self, eased: float, alpha: int) -> None:
+        layer = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        positions = [
+            (
+                GRID_CENTER[0] + (position[0] - GRID_CENTER[0]) * eased,
+                GRID_CENTER[1] + (position[1] - GRID_CENTER[1]) * eased,
+            )
+            for position in self.node_positions
+        ]
+        selected = self.pattern_input.nodes
+        for first, second in zip(selected, selected[1:]):
+            self._draw_neon_line(
+                layer, positions[first], positions[second], alpha
+            )
+        if self.pattern_input.dragging and selected:
+            start = positions[selected[-1]]
+            mouse = pygame.mouse.get_pos()
+            dx = mouse[0] - start[0]
+            dy = mouse[1] - start[1]
+            distance = math.hypot(dx, dy)
+            end = (
+                (
+                    start[0] + dx / distance * GRID_GAP,
+                    start[1] + dy / distance * GRID_GAP,
+                )
+                if distance > GRID_GAP
+                else mouse
+            )
+            self._draw_neon_line(layer, start, end, min(alpha, 190))
+        for index, position in enumerate(positions):
+            active = index in selected
+            pygame.draw.circle(
+                layer, (13, 15, 28, alpha // 4), position, NODE_RADIUS + 8
+            )
+            pygame.draw.circle(
+                layer,
+                (*CYAN, alpha) if active else (180, 184, 205, alpha // 2),
+                position,
+                NODE_RADIUS,
+                4,
+            )
+            if active:
+                pygame.draw.circle(layer, (*CYAN, alpha), position, 7)
+        self.screen.blit(layer, (0, 0))
 
     def _draw_background(self) -> None:
         for i in range(70):
@@ -490,6 +1334,7 @@ class ExorcismGame:
         self.screen.blit(help_text, help_text.get_rect(center=(WIDTH // 2, 570)))
 
     def _draw_playing(self) -> None:
+        self._draw_stage_background()
         self._draw_world()
         self._draw_reward_orbs()
         self._draw_hud()
@@ -502,6 +1347,7 @@ class ExorcismGame:
             self.screen.blit(overlay, (0, 0))
 
     def _draw_paused(self) -> None:
+        self._draw_stage_background()
         self._draw_world()
         self._draw_reward_orbs()
         self._draw_hud()
@@ -523,12 +1369,22 @@ class ExorcismGame:
         self.resume_button.draw(self.screen, self.font)
         self.pause_restart_button.draw(self.screen, self.font)
 
+    def _draw_stage_background(self) -> None:
+        if self.stage_background is not None:
+            self.screen.blit(self.stage_background, (0, 0))
+            shade = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            shade.fill((8, 8, 18, 58))
+            self.screen.blit(shade, (0, 0))
+        else:
+            self.screen.fill(BG)
+            self._draw_background()
+
     def _draw_world(self) -> None:
-        aura = pygame.Surface((164, 164), pygame.SRCALPHA)
-        pygame.draw.circle(aura, (*CYAN, 22), (82, 82), 75)
-        pygame.draw.circle(aura, (*GOLD, 65), (82, 82), PLAYER_RADIUS + 9, 2)
-        self.screen.blit(aura, aura.get_rect(center=PLAYER_POSITION))
-        if self.player_images:
+        if self.player_attack_timer > 0 and self.player_attack_image is not None:
+            frame = self.player_attack_image
+            rect = frame.get_rect(center=PLAYER_POSITION)
+            self.screen.blit(frame, rect)
+        elif self.player_images:
             frame = self._player_idle_frame()
             rect = frame.get_rect(center=PLAYER_POSITION)
             self.screen.blit(frame, rect)
@@ -1092,27 +1948,49 @@ class ExorcismGame:
         selected = self.pattern_input.nodes
         dragging = self.pattern_input.dragging
         layer = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        intro_progress = min(
+            1.0,
+            self.grid_intro_elapsed / self.grid_intro_duration,
+        )
+        intro_eased = (
+            intro_progress
+            * intro_progress
+            * intro_progress
+            * (
+                intro_progress
+                * (intro_progress * 6.0 - 15.0)
+                + 10.0
+            )
+        )
+        intro_alpha = round(255 * intro_eased)
+        display_positions = [
+            (
+                GRID_CENTER[0] + (position[0] - GRID_CENTER[0]) * intro_eased,
+                GRID_CENTER[1] + (position[1] - GRID_CENTER[1]) * intro_eased,
+            )
+            for position in self.node_positions
+        ]
         for first, second in zip(self.pending_shift_pattern, self.pending_shift_pattern[1:]):
             self._draw_neon_line(
                 layer,
-                self.node_positions[first],
-                self.node_positions[second],
+                display_positions[first],
+                display_positions[second],
                 190,
                 GOLD,
             )
         for node in self.pending_shift_pattern:
-            pygame.draw.circle(layer, (*GOLD, 220), self.node_positions[node], 8)
+            pygame.draw.circle(layer, (*GOLD, 220), display_positions[node], 8)
         line_color = GOLD if self.input_shift_layer and not self.input_shift_cancelled else CYAN
         for first, second in zip(selected, selected[1:]):
             self._draw_neon_line(
                 layer,
-                self.node_positions[first],
-                self.node_positions[second],
+                display_positions[first],
+                display_positions[second],
                 255,
                 line_color,
             )
         if dragging and selected:
-            start = self.node_positions[selected[-1]]
+            start = display_positions[selected[-1]]
             mouse = pygame.mouse.get_pos()
             dx = mouse[0] - start[0]
             dy = mouse[1] - start[1]
@@ -1132,22 +2010,29 @@ class ExorcismGame:
                 line_color,
             )
 
-        for index, position in enumerate(self.node_positions):
+        for index, position in enumerate(display_positions):
             active = index in selected
-            base_alpha = 125 if dragging else 38
-            border_alpha = 220 if dragging else 82
+            base_alpha = round((125 if dragging else 38) * intro_alpha / 255)
+            border_alpha = round((220 if dragging else 82) * intro_alpha / 255)
             pygame.draw.circle(
                 layer, (18, 17, 38, base_alpha), position, NODE_RADIUS + 8
             )
             pygame.draw.circle(
                 layer,
-                (*line_color, 255) if active else (132, 125, 166, border_alpha),
+                (*line_color, intro_alpha)
+                if active
+                else (132, 125, 166, border_alpha),
                 position,
                 NODE_RADIUS,
                 4,
             )
             if active:
-                pygame.draw.circle(layer, (*line_color, 235), position, 7)
+                pygame.draw.circle(
+                    layer,
+                    (*line_color, round(235 * intro_alpha / 255)),
+                    position,
+                    7,
+                )
         if self.success_timer > 0 and self.success_pattern:
             progress = 1.0 - self.success_timer / self.success_duration
             self._draw_success_path(layer, self.success_pattern, progress)

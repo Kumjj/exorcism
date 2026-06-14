@@ -8,11 +8,34 @@ ghost.
 ## Run
 
 Python 3.10 or newer is recommended.
+The opening MP4 tutorial also requires `ffmpeg` to be available on `PATH`.
 
 ```bash
 python -m pip install -r requirements.txt
 python main.py
 ```
+
+On the first launch, `exorcism_sceen1.mp4` plays once and holds its final
+frame. Its embedded audio plays with the video. The separate tutorial music
+starts at 8 seconds and loops from that point until the player draws the
+displayed horizontal pattern. The target pattern and input grid fade in and
+spread from the center after the video finishes.
+
+After the pattern succeeds, `exorcism_sceen2.mp4` plays with its embedded
+audio and `intro_atmosphere.mp3`. The final frame remains on screen while three
+dialogue lines fade in. Click or press `Enter`/`Space` to advance. After the
+last line, the scene fades to black and then fades into the game.
+The in-game scene uses `stage1.png` as its background.
+The atmosphere track starts from 8 seconds, loops that remaining section, and
+continues across both videos, dialogue, and gameplay without restarting.
+Dialogue characters appear one by one with a short upward motion. The panel
+stays in place while lines switch with a quick text fade.
+Peter's speech sound overlaps once for every two revealed dialogue characters.
+Each newly
+spawned ghost randomly plays one of `boo1.mp3` through `boo3.mp3`; defeating
+that ghost stops its boo immediately and plays `ghost_defeated.mp3`.
+Peter briefly switches to `peter_attack1.png` whenever a ghost pattern hits or
+any holy-power spell is successfully cast.
 
 ## Controls
 
