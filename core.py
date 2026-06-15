@@ -962,11 +962,45 @@ class GameSession:
             GhostKind.FORBIDDEN,
         ),
     }
+    STAGE_TWO_WAVES = {
+        1: (
+            GhostKind.BLINKING,
+            GhostKind.WAVY,
+            GhostKind.PARTIAL,
+            GhostKind.BLINKING,
+            GhostKind.START_LOCKED,
+            GhostKind.WAVY,
+            GhostKind.PARTIAL,
+        ),
+        2: (
+            GhostKind.CREASE,
+            GhostKind.PARTIAL,
+            GhostKind.WAVY,
+            GhostKind.SNARL,
+            GhostKind.BLINKING,
+            GhostKind.CREEP,
+            GhostKind.CREASE,
+            GhostKind.PARTIAL,
+        ),
+        3: (
+            GhostKind.SNARL,
+            GhostKind.CREASE,
+            GhostKind.PARTIAL,
+            GhostKind.FORBIDDEN,
+            GhostKind.WAVY,
+            GhostKind.START_LOCKED,
+            GhostKind.BLINKING,
+            GhostKind.CREEP,
+            GhostKind.SNARL,
+            GhostKind.SLOWPOKE,
+        ),
+    }
 
     rng: random.Random = field(default_factory=random.Random)
     max_health: int = 5
     health: int = 5
     score: int = 0
+    stage: int = 1
     wave: int = 1
     spawn_queue: Deque[GhostSpec] = field(default_factory=deque)
     kind_queue: Deque[GhostKind] = field(default_factory=deque)
@@ -986,6 +1020,7 @@ class GameSession:
     def reset(self) -> None:
         self.health = self.max_health
         self.score = 0
+        self.stage = 1
         self.wave = 1
         self.spawn_queue.clear()
         self.kind_queue.clear()
@@ -1004,8 +1039,28 @@ class GameSession:
         self.boss_last_event = ""
         self.fill_wave()
 
+    def start_stage(self, stage: int) -> None:
+        if stage not in (1, 2):
+            raise ValueError(f"Unsupported stage: {stage}")
+        self.stage = stage
+        self.wave = 1
+        self.spawn_queue.clear()
+        self.kind_queue.clear()
+        self.ghosts.clear()
+        self.wave_required_patterns.clear()
+        self.stage_cleared = False
+        self.boss = None
+        self.boss_battle = False
+        self.boss_last_event = ""
+        self.fill_wave()
+
     def fill_wave(self) -> None:
-        kinds = self.STAGE_ONE_WAVES.get(self.wave, ())
+        waves = (
+            self.STAGE_ONE_WAVES
+            if self.stage == 1
+            else self.STAGE_TWO_WAVES
+        )
+        kinds = waves.get(self.wave, ())
         specs = [self.rng.choice(GHOST_SPECS) for _ in kinds]
         self.spawn_queue.extend(specs)
         self.kind_queue.extend(kinds)
@@ -1057,8 +1112,8 @@ class GameSession:
             )[0]
         )
         if planned_spawn:
-            pattern_count = self._stage_one_pattern_count(kind)
-            pattern_pool = self._stage_one_pattern_pool(kind)
+            pattern_count = self._planned_pattern_count(kind)
+            pattern_pool = self._planned_pattern_pool(kind)
         else:
             pattern_count = self.rng.choices(
                 (1, 2, 3), weights=(65, 30, 5), k=1
@@ -1074,7 +1129,7 @@ class GameSession:
         crease_target_pattern: Pattern = ()
         crease_axes: list[str] = []
         if kind is GhostKind.CREASE:
-            source_patterns = self.rng.sample(PATTERN_POOL, k=pattern_count)
+            source_patterns = self.rng.sample(pattern_pool, k=pattern_count)
             crease_axes = [
                 self.rng.choices(("x", "y", "origin"), weights=(47, 47, 6), k=1)[0]
                 for _ in source_patterns
@@ -1087,7 +1142,11 @@ class GameSession:
             ]
             crease_target_pattern = remaining_patterns[0]
         elif kind is GhostKind.SNARL:
-            snarl_count = self.rng.choices((1, 2), weights=(70, 30), k=1)[0]
+            snarl_count = (
+                max(2, pattern_count)
+                if planned_spawn and self.stage == 2
+                else self.rng.choices((1, 2), weights=(70, 30), k=1)[0]
+            )
             remaining_patterns = []
             for _ in range(snarl_count):
                 if self.rng.random() < 0.42:
@@ -1157,7 +1216,15 @@ class GameSession:
             for boss_position in boss_positions
         )
 
-    def _stage_one_pattern_count(self, kind: GhostKind) -> int:
+    def _planned_pattern_count(self, kind: GhostKind) -> int:
+        if self.stage == 2:
+            if self.wave == 1:
+                return 2
+            if self.wave == 2:
+                return 3 if kind is GhostKind.CREEP else 2
+            if kind in (GhostKind.CREEP, GhostKind.START_LOCKED):
+                return 3
+            return self.rng.choice((2, 3))
         if self.wave == 1:
             return 1
         if self.wave == 2:
@@ -1176,13 +1243,19 @@ class GameSession:
             return self.rng.choice((2, 3))
         return 2
 
-    def _stage_one_pattern_pool(self, kind: GhostKind) -> tuple[Pattern, ...]:
+    def _planned_pattern_pool(self, kind: GhostKind) -> tuple[Pattern, ...]:
         short_patterns = tuple(
             pattern for pattern in PATTERN_POOL if len(pattern) == 3
         )
         medium_patterns = tuple(
             pattern for pattern in PATTERN_POOL if len(pattern) >= 4
         )
+        if self.stage == 2:
+            if self.wave == 1:
+                return medium_patterns
+            if self.wave == 2:
+                return PATTERN_POOL + COMPLEX_PATTERN_POOL[-4:]
+            return medium_patterns + COMPLEX_PATTERN_POOL
         if self.wave == 1:
             return short_patterns
         if self.wave == 2:
@@ -1218,7 +1291,7 @@ class GameSession:
         boss_spec = GhostSpec(
             "Piton",
             COMPLEX_PATTERN_POOL[0],
-            min(spec.speed for spec in GHOST_SPECS) / 1.5,
+            min(spec.speed for spec in GHOST_SPECS) / 1.7,
             4000,
             50,
             (180, 145, 220),
@@ -1351,6 +1424,21 @@ class GameSession:
     def damage(self, amount: int = 1) -> None:
         self.health = max(0, self.health - amount)
 
+    def defeat_all_ghosts(self) -> None:
+        self.spawn_queue.clear()
+        self.kind_queue.clear()
+        for ghost in self.ghosts:
+            if ghost.vanishing:
+                continue
+            ghost.hidden_remaining = 0.0
+            ghost.reappear_remaining = 0.0
+            ghost.spawn_elapsed = ghost.spawn_duration
+            ghost.knockback_active = False
+            ghost.movement_phase = "pause"
+            ghost.movement_elapsed = 0.0
+            ghost.vanishing = True
+            ghost.fade_remaining = ghost.fade_duration
+
     def judge_pattern(self, pattern: Iterable[int] | tuple[Pattern, Pattern]) -> PatternResult:
         raw = tuple(pattern)
         entered: PatternAttempt = raw  # type: ignore[assignment]
@@ -1390,6 +1478,7 @@ class GameSession:
                 elif boss_result == "defeated":
                     self.score += self.boss.spec.score
                     self.spells.gain(self.boss.spec.holy_power)
+                    self.defeat_all_ghosts()
                     self.defeated_events.append(
                         (self.boss.x, self.boss.y, self.boss.spec.holy_power)
                     )

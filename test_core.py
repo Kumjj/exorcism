@@ -306,6 +306,62 @@ class GameSessionTests(unittest.TestCase):
                 }
             )
 
+    def test_stage_two_uses_three_progressive_waves(self) -> None:
+        old_kinds = {
+            GhostKind.SLOWPOKE,
+            GhostKind.START_LOCKED,
+            GhostKind.CREEP,
+            GhostKind.FORBIDDEN,
+        }
+        old_kind_counts = []
+
+        for wave, expected_kinds in GameSession.STAGE_TWO_WAVES.items():
+            self.session.stage = 2
+            self.session.wave = wave
+            self.session.spawn_queue.clear()
+            self.session.kind_queue.clear()
+            self.session.fill_wave()
+
+            self.assertEqual(tuple(self.session.kind_queue), expected_kinds)
+            self.assertEqual(len(self.session.spawn_queue), len(expected_kinds))
+            old_kind_counts.append(
+                sum(kind in old_kinds for kind in expected_kinds)
+            )
+
+        self.assertEqual(old_kind_counts[:2], [1, 1])
+        self.assertGreater(old_kind_counts[2], old_kind_counts[1])
+
+    def test_start_stage_two_resets_queues_and_fills_first_wave(self) -> None:
+        self.session.ghosts = [self.normal]
+        self.session.wave = 3
+        self.session.stage_cleared = True
+
+        self.session.start_stage(2)
+
+        self.assertEqual(self.session.stage, 2)
+        self.assertEqual(self.session.wave, 1)
+        self.assertFalse(self.session.stage_cleared)
+        self.assertEqual(self.session.ghosts, [])
+        self.assertEqual(
+            tuple(self.session.kind_queue),
+            GameSession.STAGE_TWO_WAVES[1],
+        )
+
+    def test_stage_two_starts_with_longer_two_pattern_ghosts(self) -> None:
+        self.session.start_stage(2)
+
+        while self.session.spawn_queue:
+            ghost = self.session.spawn_next(
+                ((800.0, 300.0),),
+                (400.0, 300.0),
+            )
+            self.assertIsNotNone(ghost)
+            self.assertGreaterEqual(len(ghost.remaining_patterns), 2)
+            for pattern in ghost.remaining_patterns:
+                self.assertFalse(isinstance(pattern[0], tuple))
+                self.assertGreaterEqual(len(pattern), 4)
+            self.session.ghosts.clear()
+
     def test_third_wave_uses_advanced_stage_one_rules(self) -> None:
         self.session.wave = 3
         self.session.fill_wave()
@@ -417,6 +473,45 @@ class GameSessionTests(unittest.TestCase):
                 self.assertEqual(len(boss.patterns), 7)
 
         self.assertTrue(boss.defeated)
+
+    def test_defeating_piton_immediately_cancels_all_support_ghosts(self) -> None:
+        boss = self.session.start_boss_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.spawn_elapsed = boss.spawn_duration
+        support = Ghost(
+            GHOST_SPECS[0],
+            600.0,
+            300.0,
+            400.0,
+            300.0,
+        )
+        hidden_support = Ghost(
+            GHOST_SPECS[1],
+            700.0,
+            300.0,
+            400.0,
+            300.0,
+            kind=GhostKind.CREEP,
+        )
+        hidden_support.hide_and_reappear_at((750.0, 300.0))
+        self.session.ghosts = [support, hidden_support]
+        boss.row_index = len(boss.rows) - 1
+        boss.patterns = [boss.rows[-1][0]]
+        boss.sealed_slots.clear()
+
+        result = self.session.judge_pattern(boss.patterns[0])
+
+        self.assertEqual(result, PatternResult.HIT)
+        self.assertTrue(boss.defeated)
+        self.assertTrue(all(ghost.vanishing for ghost in self.session.ghosts))
+        self.assertTrue(
+            all(not ghost.is_interactive for ghost in self.session.ghosts)
+        )
+        self.assertEqual(hidden_support.hidden_remaining, 0.0)
+        self.assertEqual(len(self.session.spawn_queue), 0)
+        self.assertEqual(len(self.session.kind_queue), 0)
 
     def test_piton_pattern_seals_stop_at_four_slots(self) -> None:
         boss = self.session.start_boss_battle(

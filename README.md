@@ -70,6 +70,15 @@ Stage 1 is limited to three curated waves:
   toward longer patterns. Forbidden traps deliberately reuse another ghost's
   required pattern.
 
+Stage 2 is prepared as three data-driven waves and can be started with
+`GameSession.start_stage(2)` after its future transition video. Wave 1 focuses
+on blinking, wavy, and partial-pattern ghosts. Wave 2 introduces crease and
+layered snarl ghosts. Wave 3 mixes those newer gimmicks with forbidden, hiding,
+start-locked, and ordinary ghosts. It begins with two medium-length patterns
+per ghost and gradually adds three-pattern and complex-pattern combinations.
+For temporary testing, pressing `Ctrl+Shift+G` during the Piton battle defeats
+the boss and support ghosts, then runs the `scene2.png` epilogue before Stage 2.
+
 After wave 3, the screen fades to black and `exorcism3.mp4` plays before the
 Piton boss battle. Piton has three rows of seven patterns. Sealed pattern slots
 cannot be attacked; each `SANCTIFY` cast removes one seal. Adjacent sealed slots
@@ -77,9 +86,13 @@ share one rectangular seal frame. Piton adds a random seal every 10 seconds and
 adds another when advancing to rows two and three. If `SANCTIFY` itself is
 sealed, it returns automatically after five seconds.
 
-Piton approaches 1.5 times more slowly than the slowest regular ghost. Contact
+Piton approaches 1.7 times more slowly than the slowest regular ghost. Contact
 deals two health, then Piton fades out and reappears from a clear outer
 direction. Support ghosts spawn more frequently as each boss row is cleared.
+When Piton is defeated, every remaining support ghost immediately loses its
+attack and plays its defeat animation in place. After all defeat animations,
+the game fades to `scene2.png`, presents Peter's three-line epilogue dialogue,
+then fades into Stage 2.
 
 When Peter's health reaches zero, gameplay fades to black and then reveals
 `peter_defeat_scene.png` before the game-over controls appear.

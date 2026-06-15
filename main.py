@@ -245,6 +245,8 @@ class ExorcismGame:
             "peter_defeat_scene.png"
         )
         self.stage_background = self._load_cover_image("stage1.png")
+        self.story_background: pygame.Surface | None = None
+        self.boss_epilogue_background = self._load_cover_image("scene2.png")
         self.pending_shift_pattern: tuple[int, ...] = ()
         self.input_shift_layer = False
         self.input_shift_cancelled = False
@@ -294,11 +296,12 @@ class ExorcismGame:
             start_seconds=8.0,
         )
         self.story_music_channel: pygame.mixer.Channel | None = None
-        self.story_dialogue_lines = (
+        self.intro_story_dialogue_lines = (
             "...기운이 깊다. 이곳인가.",
             "의뢰인은 이 저택에서 사라진 가족의 목소리를 들었다고 했지.",
             "그 목소리의 근원... 확인해야겠군",
         )
+        self.story_dialogue_lines = self.intro_story_dialogue_lines
         self.story_dialogue_index = 0
         self.story_dialogue_elapsed = 0.0
         self.story_dialogue_fade_duration = 0.24
@@ -314,6 +317,7 @@ class ExorcismGame:
         self.story_transition_elapsed = 0.0
         self.story_transition_duration = 1.8
         self.story_game_ready = False
+        self.story_destination_stage = 1
         self.stage_clear_elapsed = 0.0
         self.stage_clear_delay = 1.35
         self.boss_transition_elapsed = 0.0
@@ -324,6 +328,10 @@ class ExorcismGame:
         )
         self.boss_video_channel: pygame.mixer.Channel | None = None
         self.boss_support_timer = 4.5
+        self.boss_epilogue_elapsed = 0.0
+        self.boss_epilogue_duration = 1.8
+        self.boss_epilogue_scene_ready = False
+        self.boss_epilogue_started = False
         self.defeat_transition_elapsed = 0.0
         self.defeat_transition_duration = 1.4
         self.defeat_scene_ready = False
@@ -727,6 +735,9 @@ class ExorcismGame:
 
     def _start_story_scene(self) -> None:
         self.state = "story"
+        self.story_background = None
+        self.story_destination_stage = 1
+        self.story_dialogue_lines = self.intro_story_dialogue_lines
         self.story_dialogue_index = 0
         self.story_dialogue_elapsed = 0.0
         self.story_dialogue_typing_elapsed = 0.0
@@ -779,7 +790,10 @@ class ExorcismGame:
             self.story_video.close()
 
     def _prepare_game_after_story(self) -> None:
-        self._start_game()
+        if self.story_destination_stage == 2:
+            self._prepare_stage_two()
+        else:
+            self._start_game()
         self.state = "story_transition"
         self.story_game_ready = True
 
@@ -813,7 +827,7 @@ class ExorcismGame:
         self.session.start_boss_battle(SPAWN_POSITIONS, PLAYER_POSITION)
         self.grid_intro_elapsed = 0.0
         self.spawn_timer = self.grid_intro_duration + 0.25
-        self.boss_support_timer = 3.4
+        self.boss_support_timer = 2.8
 
     def _skip_intro(self) -> None:
         if self.tutorial_video_channel is not None:
@@ -829,8 +843,15 @@ class ExorcismGame:
         self._start_game()
 
     def _handle_secret_skip(self) -> None:
+        if (
+            self.state in ("story", "story_transition")
+            and self.story_destination_stage == 2
+        ):
+            return
         if self.state in ("tutorial", "story", "story_transition"):
             self._skip_intro()
+        elif self.state == "playing" and self.session.boss_battle:
+            self._skip_to_boss_epilogue()
         elif self.state == "playing" and not self.session.boss_battle:
             self.session.spawn_queue.clear()
             self.session.kind_queue.clear()
@@ -855,6 +876,78 @@ class ExorcismGame:
             self._prepare_boss_battle()
         self.state = "playing"
         self.grid_intro_elapsed = 0.0
+
+    def _skip_to_boss_epilogue(self) -> None:
+        boss = self.session.boss
+        if boss is None:
+            return
+        boss.defeated = True
+        boss.fade_remaining = boss.fade_duration
+        boss.knockback_active = False
+        self.session.defeat_all_ghosts()
+        self.session.boss_last_event = "defeated"
+        self._stop_all_ghost_boo()
+        if self.ghost_defeated_sound is not None:
+            self.ghost_defeated_sound.play()
+        self.pattern_input.clear()
+        self.last_drag_position = None
+        self.pending_shift_pattern = ()
+        self.input_shift_layer = False
+        self.input_shift_cancelled = False
+        self.state = "playing"
+
+    def _prepare_stage_two(self) -> None:
+        self._stop_all_ghost_boo()
+        self.session.start_stage(2)
+        self.pattern_input.clear()
+        self.last_drag_position = None
+        self.pending_shift_pattern = ()
+        self.input_shift_layer = False
+        self.input_shift_cancelled = False
+        self.success_pattern = ()
+        self.success_timer = 0.0
+        self.spell_pattern = ()
+        self.spell_timer = 0.0
+        self.reward_orbs.clear()
+        self.player_attack_timer = 0.0
+        self.stage_clear_elapsed = 0.0
+        self.grid_intro_elapsed = 0.0
+        self.spawn_timer = self.grid_intro_duration + 0.25
+        self.message_timer = 0.0
+        self.boss_epilogue_started = False
+
+    def _start_boss_epilogue_transition(self) -> None:
+        if self.boss_epilogue_started:
+            return
+        self.boss_epilogue_started = True
+        self.boss_epilogue_elapsed = 0.0
+        self.boss_epilogue_scene_ready = False
+        self.pattern_input.clear()
+        self._stop_all_ghost_boo()
+        self.state = "boss_epilogue_transition"
+
+    def _start_boss_epilogue_story(self) -> None:
+        self.story_dialogue_lines = (
+            "융합된 영혼들... 의지로 모인 게 아니었군.",
+            "누군가 이들을 묶고, 본관 쪽으로 흘려보낸 것이겠지.",
+            "의뢰인은 창고를 말했지만... 진짜 근원은 저택 안쪽이군.",
+        )
+        self.story_dialogue_index = 0
+        self.story_dialogue_elapsed = 0.0
+        self.story_dialogue_typing_elapsed = 0.0
+        self.story_dialogue_visible_characters = 0
+        self.story_dialogue_spoken_pairs = 0
+        self.story_prompt_elapsed = 0.0
+        self.story_dialogue_active = False
+        self.story_dialogue_phase = "fade_in"
+        self.story_transition_elapsed = 0.0
+        self.story_game_ready = False
+        self.story_destination_stage = 2
+        self.story_background = self.boss_epilogue_background
+        self.story_video = None
+        self.story_video_sound = None
+        self.story_video_channel = None
+        self.state = "story"
 
     def _start_defeat_transition(self) -> None:
         if self.state in ("defeat_transition", "gameover"):
@@ -1087,6 +1180,9 @@ class ExorcismGame:
         if self.state == "boss_return_transition":
             self._update_boss_return_transition(seconds)
             return
+        if self.state == "boss_epilogue_transition":
+            self._update_boss_epilogue_transition(seconds)
+            return
         if self.state == "defeat_transition":
             self._update_defeat_transition(seconds)
             return
@@ -1128,6 +1224,16 @@ class ExorcismGame:
             seconds, PLAYER_POSITION, PLAYER_RADIUS
         )
         self._remove_inactive_ghost_boo_channels()
+        boss = self.session.boss
+        if (
+            self.session.boss_battle
+            and boss is not None
+            and boss.defeated
+            and boss.fade_remaining <= 0
+            and not self.session.ghosts
+        ):
+            self._start_boss_epilogue_transition()
+            return
         if escaped:
             self.message_timer = 1.8
             self.flash_color = RED
@@ -1293,6 +1399,20 @@ class ExorcismGame:
         if self.boss_transition_elapsed >= self.story_transition_duration:
             self.state = "playing"
 
+    def _update_boss_epilogue_transition(self, seconds: float) -> None:
+        self.boss_epilogue_elapsed = min(
+            self.boss_epilogue_duration,
+            self.boss_epilogue_elapsed + seconds,
+        )
+        midpoint = self.boss_epilogue_duration / 2.0
+        if (
+            not self.boss_epilogue_scene_ready
+            and self.boss_epilogue_elapsed >= midpoint
+        ):
+            self.boss_epilogue_scene_ready = True
+        if self.boss_epilogue_elapsed >= self.boss_epilogue_duration:
+            self._start_boss_epilogue_story()
+
     def _update_boss_battle(self, seconds: float) -> None:
         boss = self.session.boss
         if boss is None:
@@ -1309,7 +1429,7 @@ class ExorcismGame:
         if boss.defeated:
             return
         self.boss_support_timer -= seconds
-        support_limits = (2, 3, 4)
+        support_limits = (3, 4, 5)
         support_limit = support_limits[boss.row_index]
         if self.boss_support_timer <= 0 and len(self.session.ghosts) < support_limit:
             ghost = self.session.spawn_boss_support(
@@ -1318,7 +1438,7 @@ class ExorcismGame:
             )
             if ghost is not None:
                 self._play_ghost_spawn_sound(ghost)
-            intervals = (4.4, 3.2, 2.2)
+            intervals = (3.8, 2.7, 1.8)
             self.boss_support_timer = (
                 intervals[boss.row_index] if ghost is not None else 0.25
             )
@@ -1396,6 +1516,8 @@ class ExorcismGame:
             self._draw_boss_video()
         elif self.state == "boss_return_transition":
             self._draw_boss_return_transition()
+        elif self.state == "boss_epilogue_transition":
+            self._draw_boss_epilogue_transition()
         elif self.state == "defeat_transition":
             self._draw_defeat_transition()
         elif self.state == "playing":
@@ -1437,6 +1559,29 @@ class ExorcismGame:
             )
         overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, round(255 * fade)))
+        self.screen.blit(overlay, (0, 0))
+
+    def _draw_boss_epilogue_background(self) -> None:
+        if self.boss_epilogue_background is not None:
+            self.screen.blit(self.boss_epilogue_background, (0, 0))
+        else:
+            self.screen.fill((6, 7, 12))
+
+    def _draw_boss_epilogue_transition(self) -> None:
+        midpoint = self.boss_epilogue_duration / 2.0
+        if self.boss_epilogue_scene_ready:
+            self._draw_boss_epilogue_background()
+            fade = max(
+                0.0,
+                1.0
+                - (self.boss_epilogue_elapsed - midpoint) / midpoint,
+            )
+        else:
+            self._draw_playing()
+            fade = min(1.0, self.boss_epilogue_elapsed / midpoint)
+        eased = fade * fade * (3.0 - 2.0 * fade)
+        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, round(255 * eased)))
         self.screen.blit(overlay, (0, 0))
 
     def _draw_defeat_background(self) -> None:
@@ -1594,6 +1739,8 @@ class ExorcismGame:
     def _draw_story(self) -> None:
         if self.story_video is not None and self.story_video.surface is not None:
             self.screen.blit(self.story_video.surface, (0, 0))
+        elif self.story_background is not None:
+            self.screen.blit(self.story_background, (0, 0))
         else:
             self.screen.fill(BG)
             self._draw_background()
@@ -2481,7 +2628,9 @@ class ExorcismGame:
         if self.session.boss_battle and self.session.boss is not None:
             wave_text = f"PITON  ROW {self.session.boss.row_number}/3"
         else:
-            wave_text = f"WAVE  {self.session.wave}"
+            wave_text = (
+                f"STAGE {self.session.stage}  WAVE {self.session.wave}"
+            )
         wave = self.font.render(wave_text, True, GOLD)
         self.screen.blit(wave, (500, 34))
 
