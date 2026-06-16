@@ -62,6 +62,46 @@ COMPLEX_PATTERN_POOL: tuple[Pattern, ...] = (
     (6, 4, 3, 0, 1, 2),
     (8, 4, 7, 6, 3, 0),
 )
+STAGE_TWO_PATTERN_POOL: tuple[Pattern, ...] = (
+    (0, 4, 1, 2),
+    (2, 4, 1, 0),
+    (0, 4, 3, 6),
+    (2, 4, 5, 8),
+    (6, 4, 3, 0),
+    (8, 4, 5, 2),
+    (0, 4, 5, 8),
+    (2, 4, 3, 6),
+    (6, 4, 1, 2),
+    (8, 4, 7, 6),
+    (0, 4, 2, 5, 8),
+    (2, 4, 0, 3, 6),
+    (6, 4, 8, 5, 2),
+    (8, 4, 6, 3, 0),
+    (0, 4, 1, 2, 5),
+    (2, 4, 5, 8, 7),
+)
+WEAVER_PATTERN_POOL: tuple[Pattern, ...] = (
+    (0, 4, 8, 5, 2),
+    (2, 4, 6, 3, 0),
+    (6, 4, 2, 1, 0),
+    (8, 4, 0, 3, 6),
+    (0, 4, 2, 5, 8),
+    (2, 4, 0, 3, 6),
+    (6, 4, 8, 5, 2),
+    (8, 4, 6, 3, 0),
+    (1, 4, 7, 3, 0),
+    (7, 4, 1, 5, 8),
+    (0, 4, 7, 5, 2, 1),
+    (2, 4, 3, 7, 6, 5),
+)
+WEAVER_LAYERED_PATTERN_POOL: tuple[tuple[Pattern, Pattern], ...] = (
+    ((0, 1, 4, 7), (2, 5, 8)),
+    ((0, 3, 4, 5), (2, 1, 4, 7)),
+    ((6, 3, 4, 1, 2), (8, 5, 4, 7)),
+    ((0, 4, 8), (2, 1, 4, 3, 6)),
+    ((6, 7, 4, 1), (0, 3, 4, 5, 8)),
+    ((2, 5, 4, 7, 6), (0, 1, 4, 3)),
+)
 LAYERED_PATTERN_POOL: tuple[tuple[Pattern, Pattern], ...] = (
     ((0, 1, 2), (6, 7, 8)),
     ((0, 3, 6), (2, 5, 8)),
@@ -224,10 +264,35 @@ class Ghost:
     crease_source_pattern: Pattern = ()
     crease_target_pattern: Pattern = ()
     crease_axes: list[str] = field(default_factory=list)
+    start_locked_slots: list[bool] = field(default_factory=list)
+    partial_slots: list[bool] = field(default_factory=list)
+    removed_start_locked: bool = False
+    removed_partial: bool = False
+    sealed_slots: set[int] = field(default_factory=set)
+    max_sealed_slots: int = 1
 
     def __post_init__(self) -> None:
         if not self.remaining_patterns:
             self.remaining_patterns = [self.spec.pattern]
+        pattern_count = len(self.remaining_patterns)
+        if not self.start_locked_slots:
+            self.start_locked_slots = [
+                self.kind is GhostKind.START_LOCKED
+            ] + [False] * (pattern_count - 1)
+        else:
+            self.start_locked_slots = (
+                self.start_locked_slots[:pattern_count]
+                + [False] * max(0, pattern_count - len(self.start_locked_slots))
+            )
+        if not self.partial_slots:
+            self.partial_slots = [
+                self.kind is GhostKind.PARTIAL
+            ] + [False] * (pattern_count - 1)
+        else:
+            self.partial_slots = (
+                self.partial_slots[:pattern_count]
+                + [False] * max(0, pattern_count - len(self.partial_slots))
+            )
         self.art_variant = 1 if self.art_variant == 1 else 2
         if not self.removed_pattern:
             self.hit_reaction_elapsed = self.hit_reaction_duration
@@ -245,7 +310,11 @@ class Ghost:
 
     @property
     def strict_start(self) -> bool:
-        return self.kind is GhostKind.START_LOCKED
+        return bool(self.start_locked_slots and self.start_locked_slots[0])
+
+    @property
+    def partial_pattern(self) -> bool:
+        return bool(self.partial_slots and self.partial_slots[0])
 
     @property
     def is_spawned(self) -> bool:
@@ -261,7 +330,7 @@ class Ghost:
         )
 
     def matches_required(self, entered: PatternAttempt) -> bool:
-        if not self.remaining_patterns:
+        if not self.remaining_patterns or 0 in self.sealed_slots:
             return False
         return pattern_attempt_matches(entered, self.remaining_patterns[0], self.strict_start)
 
@@ -300,6 +369,8 @@ class Ghost:
             if self.pattern_transition_elapsed >= self.pattern_transition_duration:
                 self.removed_pattern = ()
                 self.removed_forbidden_pattern = ()
+                self.removed_start_locked = False
+                self.removed_partial = False
         self.slow_remaining = max(0.0, self.slow_remaining - seconds)
         if not started_reappearing:
             self.resonance_remaining = max(
@@ -417,12 +488,52 @@ class Ghost:
         self.kind = GhostKind.SLOWPOKE
         self.forbidden_patterns.clear()
         self.resonance_remaining = 0.0
+        self.start_locked_slots = [False] * len(self.remaining_patterns)
+        self.partial_slots = [False] * len(self.remaining_patterns)
+        self.purify_one()
+
+    def apply_random_seal(self, rng: random.Random) -> bool:
+        if (
+            len(self.sealed_slots) >= self.max_sealed_slots
+            or not self.remaining_patterns
+        ):
+            return False
+        available = [
+            index
+            for index in range(len(self.remaining_patterns))
+            if index not in self.sealed_slots
+        ]
+        if not available:
+            return False
+        self.sealed_slots.add(rng.choice(available))
+        return True
+
+    def purify_one(self) -> bool:
+        if not self.sealed_slots:
+            return False
+        self.sealed_slots.remove(min(self.sealed_slots))
+        return True
 
     def remove_first_pattern(self) -> bool:
         if self.vanishing or not self.remaining_patterns:
             return False
         self.pattern_transition_from_count = len(self.remaining_patterns)
         self.removed_pattern = self.remaining_patterns.pop(0)
+        self.removed_start_locked = (
+            self.start_locked_slots.pop(0)
+            if self.start_locked_slots
+            else False
+        )
+        self.removed_partial = (
+            self.partial_slots.pop(0)
+            if self.partial_slots
+            else False
+        )
+        self.sealed_slots = {
+            index - 1
+            for index in self.sealed_slots
+            if index > 0
+        }
         if self.crease_axes:
             self.crease_axes.pop(0)
         self.pattern_transition_elapsed = 0.0
@@ -504,6 +615,7 @@ class PitonBoss:
     sealed_slots: set[int] = field(default_factory=set)
     seal_timer: float = 12.0
     seal_interval: float = 12.0
+    seal_refill_delay: float = 8.0
     max_sealed_slots: int = 4
     spell_seal_timer: float = 20.0
     spell_seal_interval: float = 20.0
@@ -538,6 +650,8 @@ class PitonBoss:
     knockback_end_y: float = 0.0
     hit_reaction_elapsed: float = 0.0
     hit_reaction_duration: float = 0.7
+    seal_waiting_for_purify: bool = False
+    recently_purified_slots: set[int] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         self.patterns = list(self.rows[0])
@@ -622,7 +736,9 @@ class PitonBoss:
         if self.spell_seal_timer <= 0:
             self.apply_random_spell_seal(rng)
             self.spell_seal_timer += self.spell_seal_interval
-        if len(self.sealed_slots) < self.max_sealed_slots:
+        if self.seal_waiting_for_purify:
+            self.seal_timer = self.seal_refill_delay
+        elif len(self.sealed_slots) < self.max_sealed_slots:
             self.seal_timer -= seconds
             if self.seal_timer <= 0:
                 self.apply_random_seal(rng)
@@ -726,10 +842,13 @@ class PitonBoss:
             index
             for index in range(len(self.patterns))
             if index not in self.sealed_slots
+            and index not in self.recently_purified_slots
         ]
         if not available:
             return False
         self.sealed_slots.add(rng.choice(available))
+        if len(self.sealed_slots) >= self.max_sealed_slots:
+            self.seal_waiting_for_purify = True
         return True
 
     def apply_random_spell_seal(self, rng: random.Random) -> bool:
@@ -759,17 +878,22 @@ class PitonBoss:
             index
             for index in range(len(self.patterns))
             if index not in self.sealed_slots
+            and index not in self.recently_purified_slots
         ]
         if available:
             self.sealed_slots.add(rng.choice(available))
+            self.seal_waiting_for_purify = (
+                len(self.sealed_slots) >= self.max_sealed_slots
+            )
 
     def purify_one(self) -> bool:
         if not self.sealed_slots:
             return False
-        was_full = len(self.sealed_slots) >= self.max_sealed_slots
-        self.sealed_slots.remove(min(self.sealed_slots))
-        if was_full:
-            self.seal_timer = self.seal_interval
+        slot = min(self.sealed_slots)
+        self.sealed_slots.remove(slot)
+        self.recently_purified_slots.add(slot)
+        self.seal_waiting_for_purify = False
+        self.seal_timer = self.seal_refill_delay
         return True
 
     def hit_pattern(self, entered: PatternAttempt, rng: random.Random) -> str:
@@ -800,6 +924,9 @@ class PitonBoss:
         self.row_index += 1
         self.patterns = list(self.rows[self.row_index])
         self.sealed_slots.clear()
+        self.recently_purified_slots.clear()
+        self.seal_waiting_for_purify = False
+        self.seal_timer = self.seal_interval
         self.add_row_transition_seal(rng)
         self.apply_random_spell_seal(rng)
         return "row"
@@ -811,6 +938,76 @@ class PitonBoss:
         self.knockback_active = False
         self.movement_phase = "pause"
         self.movement_elapsed = 0.0
+
+
+@dataclass
+class WeaverBoss(PitonBoss):
+    seal_timer: float = 20.0
+    seal_interval: float = 20.0
+    snarl_timer: float = 40.0
+    snarl_interval: float = 40.0
+    pending_snarl_bursts: int = 0
+    pending_snarl_singles: int = 0
+    web_lane_timer: float = 7.0
+    web_lane_interval: float = 8.5
+    web_lane_duration: float = 6.0
+    active_web_lanes: dict[int, float] = field(default_factory=dict)
+    web_spell_timer: float = 13.0
+    web_spell_interval: float = 14.0
+    web_spell_duration: float = 9.0
+    pending_web_spell: Optional[SpellType] = None
+
+    def update(self, seconds: float, rng: random.Random) -> None:
+        super().update(seconds, rng)
+        if self.defeated or self.hidden_remaining > 0:
+            return
+        for lane, remaining in list(self.active_web_lanes.items()):
+            remaining = max(0.0, remaining - seconds)
+            if remaining <= 0:
+                self.active_web_lanes.pop(lane, None)
+            else:
+                self.active_web_lanes[lane] = remaining
+        self.snarl_timer -= seconds
+        if self.snarl_timer <= 0:
+            self.pending_snarl_bursts += 1
+            self.snarl_timer += self.snarl_interval
+        self.web_lane_timer -= seconds
+        if self.web_lane_timer <= 0:
+            for lane in rng.sample(range(8), k=2):
+                self.active_web_lanes[lane] = self.web_lane_duration
+            self.web_lane_timer += self.web_lane_interval
+        self.web_spell_timer -= seconds
+        if self.web_spell_timer <= 0:
+            self.pending_web_spell = rng.choice(
+                [spell.spell_type for spell in SpellManager.SPELLS]
+            )
+            self.web_spell_timer += self.web_spell_interval
+
+    def hit_pattern(self, entered: PatternAttempt, rng: random.Random) -> str:
+        result = super().hit_pattern(entered, rng)
+        if result == "row":
+            self.pending_snarl_singles += 1
+        return result
+
+    def web_affects_position(self, position: tuple[float, float]) -> bool:
+        if not self.active_web_lanes:
+            return False
+        dx = position[0] - self.target_x
+        dy = position[1] - self.target_y
+        if dx == 0 and dy == 0:
+            return False
+        angle = (math.atan2(dy, dx) + math.tau) % math.tau
+        lane = round(angle / (math.tau / 8.0)) % 8
+        return lane in self.active_web_lanes
+
+    def consume_web_spell(self) -> Optional[SpellType]:
+        spell_type = self.pending_web_spell
+        self.pending_web_spell = None
+        return spell_type
+
+    def clear_web_effects(self) -> None:
+        self.active_web_lanes.clear()
+        self.pending_web_spell = None
 
 class PatternInput:
     def __init__(self) -> None:
@@ -886,6 +1083,7 @@ class SpellManager:
         self.cooldowns: dict[SpellType, float] = {
             spell.spell_type: 0.0 for spell in self.SPELLS
         }
+        self.cooldown_drags: dict[SpellType, float] = {}
 
     def gain(self, amount: int) -> None:
         self.holy_power = min(self.MAX_POWER, self.holy_power + amount)
@@ -915,7 +1113,24 @@ class SpellManager:
 
     def update(self, seconds: float) -> None:
         for spell_type, remaining in list(self.cooldowns.items()):
-            self.cooldowns[spell_type] = max(0.0, remaining - seconds)
+            drag_remaining = self.cooldown_drags.get(spell_type, 0.0)
+            rate = 0.5 if drag_remaining > 0 else 1.0
+            self.cooldowns[spell_type] = max(0.0, remaining - seconds * rate)
+            if drag_remaining > 0:
+                drag_remaining = max(0.0, drag_remaining - seconds)
+                if drag_remaining <= 0:
+                    self.cooldown_drags.pop(spell_type, None)
+                else:
+                    self.cooldown_drags[spell_type] = drag_remaining
+
+    def slow_cooldown(self, spell_type: SpellType, duration: float) -> None:
+        self.cooldown_drags[spell_type] = max(
+            self.cooldown_drags.get(spell_type, 0.0),
+            duration,
+        )
+
+    def clear_cooldown_drags(self) -> None:
+        self.cooldown_drags.clear()
 
     def cooldown_progress(self, spell: SpellDefinition) -> float:
         remaining = self.cooldowns.get(spell.spell_type, 0.0)
@@ -936,28 +1151,31 @@ GHOST_SPECS = (
 class GameSession:
     SPAWN_CLEARANCE = 170.0
     MAX_WAVES = 3
+    STAGE_ONE_SEAL_LIMITS = {1: 0, 2: 0, 3: 1}
+    STAGE_TWO_SEAL_LIMITS = {1: 0, 2: 1, 3: 1}
     STAGE_ONE_WAVES = {
         1: (
-            GhostKind.SLOWPOKE,
             GhostKind.START_LOCKED,
             GhostKind.SLOWPOKE,
             GhostKind.START_LOCKED,
             GhostKind.SLOWPOKE,
+            GhostKind.FORBIDDEN,
         ),
         2: (
             GhostKind.SLOWPOKE,
             GhostKind.START_LOCKED,
-            GhostKind.CREEP,
-            GhostKind.SLOWPOKE,
-            GhostKind.CREEP,
+            GhostKind.FORBIDDEN,
             GhostKind.START_LOCKED,
+            GhostKind.SLOWPOKE,
+            GhostKind.FORBIDDEN,
         ),
         3: (
             GhostKind.START_LOCKED,
-            GhostKind.CREEP,
             GhostKind.FORBIDDEN,
             GhostKind.SLOWPOKE,
-            GhostKind.CREEP,
+            GhostKind.START_LOCKED,
+            GhostKind.FORBIDDEN,
+            GhostKind.SLOWPOKE,
             GhostKind.START_LOCKED,
             GhostKind.FORBIDDEN,
         ),
@@ -966,33 +1184,33 @@ class GameSession:
         1: (
             GhostKind.BLINKING,
             GhostKind.WAVY,
+            GhostKind.SLOWPOKE,
             GhostKind.PARTIAL,
-            GhostKind.BLINKING,
+            GhostKind.CREASE,
             GhostKind.START_LOCKED,
-            GhostKind.WAVY,
             GhostKind.PARTIAL,
         ),
         2: (
             GhostKind.CREASE,
+            GhostKind.SLOWPOKE,
+            GhostKind.CREEP,
             GhostKind.PARTIAL,
-            GhostKind.WAVY,
+            GhostKind.CREASE,
             GhostKind.SNARL,
             GhostKind.BLINKING,
-            GhostKind.CREEP,
-            GhostKind.CREASE,
-            GhostKind.PARTIAL,
+            GhostKind.WAVY,
         ),
         3: (
+            GhostKind.CREASE,
             GhostKind.SNARL,
             GhostKind.CREASE,
+            GhostKind.SLOWPOKE,
             GhostKind.PARTIAL,
-            GhostKind.FORBIDDEN,
-            GhostKind.WAVY,
+            GhostKind.CREASE,
             GhostKind.START_LOCKED,
-            GhostKind.BLINKING,
+            GhostKind.FORBIDDEN,
             GhostKind.CREEP,
             GhostKind.SNARL,
-            GhostKind.SLOWPOKE,
         ),
     }
 
@@ -1013,9 +1231,10 @@ class GameSession:
     defeated_events: list[tuple[float, float, int]] = field(default_factory=list)
     wave_required_patterns: list[Pattern] = field(default_factory=list)
     stage_cleared: bool = False
-    boss: Optional[PitonBoss] = None
+    boss: Optional[PitonBoss | WeaverBoss] = None
     boss_battle: bool = False
     boss_last_event: str = ""
+    wave_seals_assigned: int = 0
 
     def reset(self) -> None:
         self.health = self.max_health
@@ -1037,6 +1256,7 @@ class GameSession:
         self.boss = None
         self.boss_battle = False
         self.boss_last_event = ""
+        self.wave_seals_assigned = 0
         self.fill_wave()
 
     def start_stage(self, stage: int) -> None:
@@ -1044,6 +1264,7 @@ class GameSession:
             raise ValueError(f"Unsupported stage: {stage}")
         self.stage = stage
         self.wave = 1
+        self.spells = SpellManager()
         self.spawn_queue.clear()
         self.kind_queue.clear()
         self.ghosts.clear()
@@ -1052,6 +1273,7 @@ class GameSession:
         self.boss = None
         self.boss_battle = False
         self.boss_last_event = ""
+        self.wave_seals_assigned = 0
         self.fill_wave()
 
     def fill_wave(self) -> None:
@@ -1065,11 +1287,13 @@ class GameSession:
         self.spawn_queue.extend(specs)
         self.kind_queue.extend(kinds)
         self.wave_required_patterns.clear()
+        self.wave_seals_assigned = 0
 
     def spawn_next(
         self,
         spawn_positions: Sequence[tuple[float, float]],
         player_position: tuple[float, float],
+        allow_seal: bool = True,
     ) -> Optional[Ghost]:
         if not self.spawn_queue or not spawn_positions:
             return None
@@ -1104,9 +1328,11 @@ class GameSession:
             else self.rng.choices(
                 tuple(GhostKind),
                 weights=(
-                    (36, 4, 6, 16, 4, 3, 8, 15, 8)
-                    if self.wave == 1
-                    else (23, 6, 8, 16, 8, 5, 11, 16, 7)
+                    (36, 4, 6, 16, 4, 3, 0, 15, 8)
+                    if self.stage == 1 and self.wave == 1
+                    else (23, 6, 8, 16, 8, 5, 0, 16, 7)
+                    if self.stage == 1
+                    else (18, 7, 10, 14, 8, 9, 12, 14, 8)
                 ),
                 k=1,
             )[0]
@@ -1187,6 +1413,21 @@ class GameSession:
             crease_target_pattern=crease_target_pattern,
             crease_axes=crease_axes,
         )
+        seal_limit = (
+            self.STAGE_TWO_SEAL_LIMITS.get(self.wave, 1)
+            if self.stage >= 2
+            else self.STAGE_ONE_SEAL_LIMITS.get(self.wave, 0)
+        )
+        seal_eligible = self.stage >= 2 or (
+            self.stage == 1 and kind is GhostKind.SLOWPOKE
+        )
+        if (
+            allow_seal
+            and seal_eligible
+            and self.wave_seals_assigned < seal_limit
+            and ghost.apply_random_seal(self.rng)
+        ):
+            self.wave_seals_assigned += 1
         ghost.start_moving_immediately()
         self.ghosts.append(ghost)
         self.wave_required_patterns.extend(
@@ -1194,6 +1435,52 @@ class GameSession:
             for pattern in remaining_patterns
             if isinstance(pattern[0], int)
         )
+        return ghost
+
+    def needs_seal_support(self) -> bool:
+        sanctify = next(
+            spell
+            for spell in SpellManager.SPELLS
+            if spell.spell_type is SpellType.NULLIFY
+        )
+        living = [
+            ghost
+            for ghost in self.ghosts
+            if not ghost.vanishing and ghost.remaining_patterns
+        ]
+        return (
+            not self.spawn_queue
+            and bool(living)
+            and self.spells.holy_power < sanctify.cost
+            and all(0 in ghost.sealed_slots for ghost in living)
+        )
+
+    def spawn_seal_support(
+        self,
+        spawn_positions: Sequence[tuple[float, float]],
+        player_position: tuple[float, float],
+    ) -> Optional[Ghost]:
+        if not self.needs_seal_support():
+            return None
+        self.spawn_queue.append(self.rng.choice(GHOST_SPECS[:2]))
+        self.kind_queue.append(GhostKind.SLOWPOKE)
+        ghost = self.spawn_next(
+            spawn_positions,
+            player_position,
+            allow_seal=False,
+        )
+        if ghost is None:
+            self.spawn_queue.pop()
+            self.kind_queue.pop()
+            return None
+        short_patterns = tuple(
+            pattern for pattern in PATTERN_POOL if len(pattern) == 3
+        )
+        ghost.remaining_patterns = [self.rng.choice(short_patterns)]
+        ghost.start_locked_slots = [False]
+        ghost.partial_slots = [False]
+        ghost.sealed_slots.clear()
+        ghost.forbidden_patterns.clear()
         return ghost
 
     def _spawn_position_is_clear(
@@ -1252,10 +1539,10 @@ class GameSession:
         )
         if self.stage == 2:
             if self.wave == 1:
-                return medium_patterns
+                return STAGE_TWO_PATTERN_POOL
             if self.wave == 2:
-                return PATTERN_POOL + COMPLEX_PATTERN_POOL[-4:]
-            return medium_patterns + COMPLEX_PATTERN_POOL
+                return STAGE_TWO_PATTERN_POOL + COMPLEX_PATTERN_POOL[-4:]
+            return STAGE_TWO_PATTERN_POOL + COMPLEX_PATTERN_POOL
         if self.wave == 1:
             return short_patterns
         if self.wave == 2:
@@ -1297,7 +1584,7 @@ class GameSession:
             (180, 145, 220),
         )
         rows = [
-            self.rng.sample(COMPLEX_PATTERN_POOL, k=7)
+            self.rng.sample(COMPLEX_PATTERN_POOL, k=5)
             for _ in range(3)
         ]
         position = self.rng.choice(tuple(spawn_positions))
@@ -1308,6 +1595,51 @@ class GameSession:
             player_position[0],
             player_position[1],
             rows,
+        )
+        self.boss_battle = True
+        self.stage_cleared = False
+        self.boss_last_event = ""
+        return self.boss
+
+    def start_weaver_battle(
+        self,
+        spawn_positions: Sequence[tuple[float, float]],
+        player_position: tuple[float, float],
+    ) -> WeaverBoss:
+        self.spawn_queue.clear()
+        self.kind_queue.clear()
+        self.ghosts.clear()
+        boss_spec = GhostSpec(
+            "Weaver",
+            WEAVER_PATTERN_POOL[-1],
+            min(spec.speed for spec in GHOST_SPECS) / 1.95,
+            6500,
+            70,
+            (185, 170, 235),
+        )
+        rows: list[list[PatternAttempt]] = []
+        axes = ("x", "y", "origin")
+        for _ in range(4):
+            row: list[PatternAttempt] = []
+            source_patterns = self.rng.sample(WEAVER_PATTERN_POOL, k=3)
+            row.extend(
+                mirrored_pattern(pattern, axis)
+                for pattern, axis in zip(source_patterns, axes)
+            )
+            row.extend(self.rng.sample(WEAVER_PATTERN_POOL, k=1))
+            row.extend(self.rng.sample(WEAVER_LAYERED_PATTERN_POOL, k=2))
+            self.rng.shuffle(row)
+            rows.append(row)
+        position = self.rng.choice(tuple(spawn_positions))
+        self.boss = WeaverBoss(
+            boss_spec,
+            position[0],
+            position[1],
+            player_position[0],
+            player_position[1],
+            rows,  # type: ignore[arg-type]
+            radius=64,
+            movement_duration=3.55,
         )
         self.boss_battle = True
         self.stage_cleared = False
@@ -1329,11 +1661,45 @@ class GameSession:
                 else (
                     GhostKind.SLOWPOKE,
                     GhostKind.START_LOCKED,
-                    GhostKind.CREEP,
+                    GhostKind.FORBIDDEN,
                 )
             )
             self.kind_queue.append(self.rng.choice(support_kinds))
         return self.spawn_next(spawn_positions, player_position)
+
+    def spawn_weaver_snarl_burst(
+        self,
+        spawn_positions: Sequence[tuple[float, float]],
+        player_position: tuple[float, float],
+    ) -> list[Ghost]:
+        if (
+            not self.boss_battle
+            or not isinstance(self.boss, WeaverBoss)
+            or self.boss.defeated
+            or (
+                self.boss.pending_snarl_bursts <= 0
+                and self.boss.pending_snarl_singles <= 0
+            )
+        ):
+            return []
+        count = 3
+        if self.boss.pending_snarl_bursts > 0:
+            self.boss.pending_snarl_bursts -= 1
+        else:
+            self.boss.pending_snarl_singles -= 1
+            count = 1
+        spawned: list[Ghost] = []
+        for _ in range(count):
+            self.spawn_queue.append(self.rng.choice(GHOST_SPECS[:3]))
+            self.kind_queue.append(GhostKind.SNARL)
+            ghost = self.spawn_next(
+                spawn_positions,
+                player_position,
+                allow_seal=False,
+            )
+            if ghost is not None:
+                spawned.append(ghost)
+        return spawned
 
     def update_boss(
         self,
@@ -1345,6 +1711,19 @@ class GameSession:
         if self.boss is None:
             return 0
         self.boss.update(seconds, self.rng)
+        if isinstance(self.boss, WeaverBoss):
+            spell_type = self.boss.consume_web_spell()
+            if spell_type is not None:
+                self.spells.slow_cooldown(spell_type, self.boss.web_spell_duration)
+            for ghost in self.ghosts:
+                if (
+                    ghost.is_interactive
+                    and self.boss.web_affects_position((ghost.x, ghost.y))
+                ):
+                    ghost.slow_remaining = max(
+                        ghost.slow_remaining,
+                        2.0 if ghost.slow_remaining > 0 else 1.0,
+                    )
         if (
             self.boss.is_interactive
             and self.boss.distance_to(player_position)
@@ -1594,8 +1973,16 @@ class GameSession:
                 if ghost.distance_to((ghost.target_x, ghost.target_y)) <= (
                     self.spells.REPEL_RADIUS
                 ):
-                    ghost.repel(self.spells.REPEL_DISTANCE)
-                    ghost.slow_remaining = self.spells.REPEL_SLOW_DURATION
+                    webbed = (
+                        isinstance(self.boss, WeaverBoss)
+                        and self.boss.web_affects_position((ghost.x, ghost.y))
+                    )
+                    ghost.repel(
+                        self.spells.REPEL_DISTANCE * (0.5 if webbed else 1.0)
+                    )
+                    ghost.slow_remaining = (
+                        self.spells.REPEL_SLOW_DURATION * (2.0 if webbed else 1.0)
+                    )
             if (
                 self.boss is not None
                 and self.boss_battle
@@ -1608,8 +1995,18 @@ class GameSession:
                 self.boss.repel(self.spells.REPEL_DISTANCE)
         elif spell.spell_type is SpellType.NULLIFY:
             self.spells.spend(spell)
+            self.spells.clear_cooldown_drags()
             if self.boss is not None and self.boss_battle:
-                self.boss.purify_one()
+                if isinstance(self.boss, WeaverBoss):
+                    self.boss.recently_purified_slots.update(
+                        self.boss.sealed_slots
+                    )
+                    self.boss.sealed_slots.clear()
+                    self.boss.seal_waiting_for_purify = False
+                    self.boss.seal_timer = self.boss.seal_refill_delay
+                    self.boss.clear_web_effects()
+                else:
+                    self.boss.purify_one()
             for ghost in active_ghosts:
                 ghost.nullify_gimmick()
         elif spell.spell_type is SpellType.TRUTH:

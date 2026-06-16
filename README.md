@@ -65,10 +65,10 @@ Only the start-locked variant requires the marked start point.
 Stage 1 is limited to three curated waves:
 
 - Wave 1 introduces ordinary and start-locked ghosts with short patterns.
-- Wave 2 adds hiding creeps with two or three patterns.
-- Wave 3 mixes hiding, start-locked, and forbidden-pattern ghosts while shifting
-  toward longer patterns. Forbidden traps deliberately reuse another ghost's
-  required pattern.
+- Wave 2 increases the number of ordinary and start-locked ghosts.
+- Wave 3 mixes start-locked and forbidden-pattern ghosts while shifting toward
+  longer patterns. Forbidden traps deliberately reuse another ghost's required
+  pattern. Hiding creeps do not appear until Stage 2.
 
 Stage 2 is prepared as three data-driven waves and can be started with
 `GameSession.start_stage(2)` after its future transition video. Wave 1 focuses
@@ -76,6 +76,8 @@ on blinking, wavy, and partial-pattern ghosts. Wave 2 introduces crease and
 layered snarl ghosts. Wave 3 mixes those newer gimmicks with forbidden, hiding,
 start-locked, and ordinary ghosts. It begins with two medium-length patterns
 per ghost and gradually adds three-pattern and complex-pattern combinations.
+Each Stage 2 ghost can carry one Piton-style sealed pattern slot. `SANCTIFY`
+removes that seal, and no regular ghost can hold more than one sealed slot.
 For temporary testing, pressing `Ctrl+Shift+G` during the Piton battle defeats
 the boss and support ghosts, then runs the `scene2.png` epilogue before Stage 2.
 
@@ -92,7 +94,8 @@ direction. Support ghosts spawn more frequently as each boss row is cleared.
 When Piton is defeated, every remaining support ghost immediately loses its
 attack and plays its defeat animation in place. After all defeat animations,
 the game fades to `scene2.png`, presents Peter's three-line epilogue dialogue,
-then fades into Stage 2.
+plays `exorcism4.mp4` with its original audio, displays temporary Peter
+dialogue over the final frame, then fades into Stage 2.
 
 When Peter's health reaches zero, gameplay fades to black and then reveals
 `peter_defeat_scene.png` before the game-over controls appear.

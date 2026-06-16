@@ -23,6 +23,7 @@ from core import (
     SpellDefinition,
     SpellManager,
     SpellType,
+    WeaverBoss,
     mirrored_pattern,
     patterns_match,
 )
@@ -241,10 +242,29 @@ class ExorcismGame:
             state: self._load_scaled_image(f"piton_{state}.png", 176)
             for state in ("idle", "attacked", "defeated")
         }
+        self.weaver_images = {
+            state: self._load_scaled_image(f"weaver_{state}.png", 190)
+            for state in ("idle", "attacked", "defeated")
+        }
+        self.weaver_web_image = self._load_scaled_image("weaver_web.png", 220)
         self.defeat_background = self._load_cover_image(
             "peter_defeat_scene.png"
         )
-        self.stage_background = self._load_cover_image("stage1.png")
+        self.stage_backgrounds = {
+            1: self._load_cover_image("stage1.png"),
+            2: self._load_cover_image("stage2.png"),
+        }
+        self.field_background = self._load_cover_image("field.png")
+        self.stage_one_cards = [
+            self._load_scaled_image("card_(fixed).png", 238),
+            self._load_scaled_image("card_(trap).png", 238),
+            self._load_scaled_image("card_(seal).png", 238),
+        ]
+        self.stage_two_cards = [
+            self._load_scaled_image("card_(ambush).png", 238),
+            self._load_scaled_image("card_(layered).png", 238),
+            self._load_scaled_image("card_(reversed).png", 238),
+        ]
         self.story_background: pygame.Surface | None = None
         self.boss_epilogue_background = self._load_cover_image("scene2.png")
         self.pending_shift_pattern: tuple[int, ...] = ()
@@ -273,6 +293,21 @@ class ExorcismGame:
         self.tutorial_success_elapsed = 0.0
         self.tutorial_success_duration = 1.2
         self.tutorial_success_active = False
+        self.stage_intro_pattern = (4, 5, 2, 1, 0, 3, 6, 7, 8)
+        self.stage_intro_center = (WIDTH // 2, HEIGHT - 154)
+        self.stage_intro_gap = 54
+        self.stage_intro_positions = self._make_grid_positions_at(
+            self.stage_intro_center,
+            self.stage_intro_gap,
+        )
+        self.stage_intro_elapsed = 0.0
+        self.stage_intro_duration = 1.8
+        self.stage_intro_success_elapsed = 0.0
+        self.stage_intro_success_duration = 1.2
+        self.stage_intro_success_active = False
+        self.stage_intro_transition_elapsed = 0.0
+        self.stage_intro_transition_duration = 1.2
+        self.stage_intro_pending = False
         self.tutorial_video = VideoPlayer(
             Path(__file__).with_name("exorcism_sceen1.mp4"),
             (WIDTH, HEIGHT),
@@ -302,6 +337,10 @@ class ExorcismGame:
             "그 목소리의 근원... 확인해야겠군",
         )
         self.story_dialogue_lines = self.intro_story_dialogue_lines
+        self.stage_four_dialogue_lines = (
+            "본관 안쪽인가... 공기가 달라졌군.",
+            "더 깊은 곳에서 영혼의 흔적이 느껴진다.",
+        )
         self.story_dialogue_index = 0
         self.story_dialogue_elapsed = 0.0
         self.story_dialogue_fade_duration = 0.24
@@ -318,6 +357,7 @@ class ExorcismGame:
         self.story_transition_duration = 1.8
         self.story_game_ready = False
         self.story_destination_stage = 1
+        self.story_next_action = "stage_1"
         self.stage_clear_elapsed = 0.0
         self.stage_clear_delay = 1.35
         self.boss_transition_elapsed = 0.0
@@ -327,7 +367,13 @@ class ExorcismGame:
             Path(__file__).with_name("exorcism3.mp4")
         )
         self.boss_video_channel: pygame.mixer.Channel | None = None
+        self.stage_end_video: VideoPlayer | None = None
+        self.stage_end_video_sound: pygame.mixer.Sound | None = None
+        self.stage_end_video_channel: pygame.mixer.Channel | None = None
+        self.stage_end_transition_elapsed = 0.0
+        self.stage_end_transition_duration = 1.2
         self.boss_support_timer = 4.5
+        self.seal_support_timer = 0.0
         self.boss_epilogue_elapsed = 0.0
         self.boss_epilogue_duration = 1.8
         self.boss_epilogue_scene_ready = False
@@ -447,6 +493,8 @@ class ExorcismGame:
             self.story_video_channel.set_volume(0.72 * self.sfx_volume)
         if self.boss_video_channel is not None:
             self.boss_video_channel.set_volume(0.78 * self.sfx_volume)
+        if self.stage_end_video_channel is not None:
+            self.stage_end_video_channel.set_volume(0.95 * self.sfx_volume)
         if self.peter_speak_sound is not None:
             self.peter_speak_sound.set_volume(0.42 * self.sfx_volume)
         for sound in self.boo_sounds:
@@ -514,13 +562,20 @@ class ExorcismGame:
         return images
 
     def _make_grid_positions(self) -> list[tuple[int, int]]:
+        return self._make_grid_positions_at(GRID_CENTER, GRID_GAP)
+
+    def _make_grid_positions_at(
+        self,
+        center: tuple[int, int],
+        gap: int,
+    ) -> list[tuple[int, int]]:
         positions = []
         for row in range(3):
             for col in range(3):
                 positions.append(
                     (
-                        GRID_CENTER[0] + (col - 1) * GRID_GAP,
-                        GRID_CENTER[1] + (row - 1) * GRID_GAP,
+                        center[0] + (col - 1) * gap,
+                        center[1] + (row - 1) * gap,
                     )
                 )
         return positions
@@ -537,12 +592,16 @@ class ExorcismGame:
             self.story_video.close()
         if self.boss_video is not None:
             self.boss_video.close()
+        if self.stage_end_video is not None:
+            self.stage_end_video.close()
         if self.tutorial_video_channel is not None:
             self.tutorial_video_channel.stop()
         if self.story_video_channel is not None:
             self.story_video_channel.stop()
         if self.boss_video_channel is not None:
             self.boss_video_channel.stop()
+        if self.stage_end_video_channel is not None:
+            self.stage_end_video_channel.stop()
         if self.story_music_channel is not None:
             self.story_music_channel.stop()
         if self.magic_spell_channel is not None:
@@ -570,9 +629,20 @@ class ExorcismGame:
         self.stage_clear_elapsed = 0.0
         self.boss_transition_elapsed = 0.0
         self.boss_support_timer = 4.5
+        self.seal_support_timer = 0.0
         self.spawn_timer = self.grid_intro_duration + 0.25
         self.message_timer = 0.0
-        self.state = "playing"
+        self._begin_stage_intro(1)
+
+    def _begin_stage_intro(self, stage: int) -> None:
+        self.stage_intro_pending = True
+        self.stage_intro_elapsed = 0.0
+        self.stage_intro_success_elapsed = 0.0
+        self.stage_intro_success_active = False
+        self.stage_intro_transition_elapsed = 0.0
+        self.pattern_input.clear()
+        self.last_drag_position = None
+        self.state = "stage_intro"
 
     def _handle_events(self) -> None:
         for event in pygame.event.get():
@@ -612,6 +682,8 @@ class ExorcismGame:
                 self._handle_settings_event(event)
             elif self.state == "tutorial":
                 self._handle_tutorial_event(event)
+            elif self.state == "stage_intro":
+                self._handle_stage_intro_event(event)
             elif self.state == "story":
                 self._handle_story_event(event)
             elif self.state == "gameover":
@@ -716,6 +788,42 @@ class ExorcismGame:
             if patterns_match(pattern, self.tutorial_pattern):
                 self._start_tutorial_success()
 
+    def _handle_stage_intro_event(self, event: pygame.event.Event) -> None:
+        if (
+            self.stage_intro_elapsed < self.stage_intro_duration
+            or self.stage_intro_success_active
+        ):
+            return
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            node = self._node_at(event.pos, self.stage_intro_positions)
+            if node is not None:
+                self.pattern_input.begin(node)
+                self.last_drag_position = event.pos
+        elif event.type == pygame.MOUSEMOTION and self.pattern_input.dragging:
+            self._add_nodes_along_segment(
+                self.last_drag_position or event.pos,
+                event.pos,
+                self.stage_intro_positions,
+            )
+            self.last_drag_position = event.pos
+        elif (
+            event.type == pygame.MOUSEBUTTONUP
+            and event.button == 1
+            and self.pattern_input.dragging
+        ):
+            self._add_nodes_along_segment(
+                self.last_drag_position or event.pos,
+                event.pos,
+                self.stage_intro_positions,
+            )
+            pattern = self.pattern_input.finish()
+            self.last_drag_position = None
+            if patterns_match(pattern, self.stage_intro_pattern):
+                self.stage_intro_success_active = True
+                self.stage_intro_success_elapsed = 0.0
+                self.pattern_input.clear()
+                self._play_magic_spell_sound()
+
     def _start_tutorial_success(self) -> None:
         if self.tutorial_success_active:
             return
@@ -737,6 +845,7 @@ class ExorcismGame:
         self.state = "story"
         self.story_background = None
         self.story_destination_stage = 1
+        self.story_next_action = "stage_1"
         self.story_dialogue_lines = self.intro_story_dialogue_lines
         self.story_dialogue_index = 0
         self.story_dialogue_elapsed = 0.0
@@ -780,6 +889,9 @@ class ExorcismGame:
         self.story_dialogue_elapsed = 0.0
 
     def _start_story_transition(self) -> None:
+        if self.story_next_action == "stage_4_video":
+            self._start_stage_four_video()
+            return
         self.state = "story_transition"
         self.story_transition_elapsed = 0.0
         self.story_game_ready = False
@@ -800,6 +912,42 @@ class ExorcismGame:
     def _start_boss_intro_transition(self) -> None:
         self.state = "boss_intro_transition"
         self.boss_transition_elapsed = 0.0
+        self.pattern_input.clear()
+        self._stop_all_ghost_boo()
+
+    def _start_stage_end_transition(self) -> None:
+        self.state = "stage_end_transition"
+        self.stage_end_transition_elapsed = 0.0
+        self.pattern_input.clear()
+        self._stop_all_ghost_boo()
+
+    def _start_stage_end_video(self) -> None:
+        video_path = Path(__file__).with_name("exorcism5.mp4")
+        if self.stage_end_video_channel is not None:
+            self.stage_end_video_channel.stop()
+            self.stage_end_video_channel = None
+        if self.stage_end_video is not None:
+            self.stage_end_video.close()
+        self.stage_end_video = VideoPlayer(
+            video_path,
+            (WIDTH, HEIGHT),
+            duration=6.478,
+        )
+        self.stage_end_video_sound = self._load_audio_sound(
+            video_path,
+            volume_gain=1.55,
+        )
+        if self.stage_end_video_sound is not None:
+            self.stage_end_video_channel = self.stage_end_video_sound.play()
+        self.stage_end_video.sync_start()
+        self._apply_audio_settings()
+        self.state = "stage_end_video"
+
+    def _prepare_weaver_battle(self) -> None:
+        self.session.start_weaver_battle(SPAWN_POSITIONS, PLAYER_POSITION)
+        self.grid_intro_elapsed = 0.0
+        self.spawn_timer = self.grid_intro_duration + 0.25
+        self.boss_support_timer = 1.2
         self.pattern_input.clear()
         self._stop_all_ghost_boo()
 
@@ -847,6 +995,7 @@ class ExorcismGame:
             self.state in ("story", "story_transition")
             and self.story_destination_stage == 2
         ):
+            self._skip_to_stage_two_intro()
             return
         if self.state in ("tutorial", "story", "story_transition"):
             self._skip_intro()
@@ -858,13 +1007,37 @@ class ExorcismGame:
             self.session.ghosts.clear()
             self.session.stage_cleared = True
             self.stage_clear_elapsed = self.stage_clear_delay
-            self._start_boss_intro_transition()
+            if self.session.stage == 2:
+                self._start_stage_end_transition()
+            else:
+                self._start_boss_intro_transition()
+        elif self.state in ("stage_intro", "stage_intro_transition"):
+            self.stage_intro_pending = False
+            self.pattern_input.clear()
+            self.grid_intro_elapsed = 0.0
+            self.state = "playing"
+        elif self.state == "stage_end_transition":
+            self._start_stage_end_video()
         elif self.state in (
             "boss_intro_transition",
             "boss_video",
             "boss_return_transition",
         ):
             self._skip_to_boss_battle()
+
+    def _skip_to_stage_two_intro(self) -> None:
+        if self.story_video_channel is not None:
+            self.story_video_channel.stop()
+            self.story_video_channel = None
+        if self.story_video is not None:
+            self.story_video.close()
+            self.story_video = None
+        self.story_dialogue_active = False
+        self.story_next_action = "stage_2"
+        self.story_destination_stage = 2
+        self.story_transition_elapsed = 0.0
+        self.story_game_ready = False
+        self._prepare_stage_two()
 
     def _skip_to_boss_battle(self) -> None:
         if self.boss_video_channel is not None:
@@ -915,6 +1088,8 @@ class ExorcismGame:
         self.spawn_timer = self.grid_intro_duration + 0.25
         self.message_timer = 0.0
         self.boss_epilogue_started = False
+        self.seal_support_timer = 0.0
+        self._begin_stage_intro(2)
 
     def _start_boss_epilogue_transition(self) -> None:
         if self.boss_epilogue_started:
@@ -943,10 +1118,39 @@ class ExorcismGame:
         self.story_transition_elapsed = 0.0
         self.story_game_ready = False
         self.story_destination_stage = 2
+        self.story_next_action = "stage_4_video"
         self.story_background = self.boss_epilogue_background
         self.story_video = None
         self.story_video_sound = None
         self.story_video_channel = None
+        self.state = "story"
+
+    def _start_stage_four_video(self) -> None:
+        video_path = Path(__file__).with_name("exorcism4.mp4")
+        self.story_dialogue_lines = self.stage_four_dialogue_lines
+        self.story_dialogue_index = 0
+        self.story_dialogue_elapsed = 0.0
+        self.story_dialogue_typing_elapsed = 0.0
+        self.story_dialogue_visible_characters = 0
+        self.story_dialogue_spoken_pairs = 0
+        self.story_prompt_elapsed = 0.0
+        self.story_dialogue_active = False
+        self.story_dialogue_phase = "fade_in"
+        self.story_transition_elapsed = 0.0
+        self.story_game_ready = False
+        self.story_destination_stage = 2
+        self.story_next_action = "stage_2"
+        self.story_background = None
+        self.story_video = VideoPlayer(
+            video_path,
+            (WIDTH, HEIGHT),
+            duration=4.667,
+        )
+        self.story_video_sound = self._load_tutorial_video_sound(video_path)
+        if self.story_video_sound is not None:
+            self.story_video_channel = self.story_video_sound.play()
+        self.story_video.sync_start()
+        self._apply_audio_settings()
         self.state = "story"
 
     def _start_defeat_transition(self) -> None:
@@ -1092,20 +1296,29 @@ class ExorcismGame:
                     channel.stop()
                 self.ghost_boo_channels.pop(ghost_id, None)
 
-    def _node_at(self, position: tuple[int, int]) -> int | None:
-        for index, node_position in enumerate(self.node_positions):
+    def _node_at(
+        self,
+        position: tuple[int, int],
+        node_positions: list[tuple[int, int]] | None = None,
+    ) -> int | None:
+        positions = node_positions or self.node_positions
+        for index, node_position in enumerate(positions):
             if math.dist(position, node_position) <= NODE_RADIUS + 20:
                 return index
         return None
 
     def _add_nodes_along_segment(
-        self, start: tuple[int, int], end: tuple[int, int]
+        self,
+        start: tuple[int, int],
+        end: tuple[int, int],
+        node_positions: list[tuple[int, int]] | None = None,
     ) -> None:
+        positions = node_positions or self.node_positions
         dx = end[0] - start[0]
         dy = end[1] - start[1]
         length_squared = dx * dx + dy * dy
         crossed: list[tuple[float, int]] = []
-        for index, node_position in enumerate(self.node_positions):
+        for index, node_position in enumerate(positions):
             if index in self.pattern_input.nodes:
                 continue
             if length_squared == 0:
@@ -1157,11 +1370,23 @@ class ExorcismGame:
         if self.state == "tutorial":
             self._update_tutorial(seconds)
             return
+        if self.state == "stage_intro":
+            self._update_stage_intro(seconds)
+            return
+        if self.state == "stage_intro_transition":
+            self._update_stage_intro_transition(seconds)
+            return
         if self.state == "story":
             self._update_story(seconds)
             return
         if self.state == "story_transition":
             self._update_story_transition(seconds)
+            return
+        if self.state == "stage_end_transition":
+            self._update_stage_end_transition(seconds)
+            return
+        if self.state == "stage_end_video":
+            self._update_stage_end_video(seconds)
             return
         if self.state == "boss_intro_transition":
             self.boss_transition_elapsed = min(
@@ -1192,14 +1417,21 @@ class ExorcismGame:
         if self.session.stage_cleared and not self.session.boss_battle:
             self.stage_clear_elapsed += seconds
             if self.stage_clear_elapsed >= self.stage_clear_delay:
-                self._start_boss_intro_transition()
+                if self.session.stage == 2:
+                    self._start_stage_end_transition()
+                else:
+                    self._start_boss_intro_transition()
             return
 
         if self.session.boss_battle:
             self._update_boss_battle(seconds)
         else:
             self.spawn_timer -= seconds
-            active_limit = min(2 + self.session.wave // 2, 5)
+            self.seal_support_timer = max(
+                0.0,
+                self.seal_support_timer - seconds,
+            )
+            active_limit = 2
             if (
                 self.spawn_timer <= 0
                 and self.session.spawn_queue
@@ -1219,6 +1451,19 @@ class ExorcismGame:
                     if spawned
                     else 0.25
                 )
+            if (
+                self.seal_support_timer <= 0
+                and self.session.needs_seal_support()
+            ):
+                support = self.session.spawn_seal_support(
+                    SPAWN_POSITIONS,
+                    PLAYER_POSITION,
+                )
+                if support is not None:
+                    self._play_ghost_spawn_sound(support)
+                    self.seal_support_timer = 1.4
+                else:
+                    self.seal_support_timer = 0.35
 
         escaped = self.session.update_ghosts(
             seconds, PLAYER_POSITION, PLAYER_RADIUS
@@ -1281,6 +1526,38 @@ class ExorcismGame:
             )
             if self.tutorial_success_elapsed >= self.tutorial_success_duration:
                 self._finish_tutorial()
+
+    def _update_stage_intro(self, seconds: float) -> None:
+        self.stage_intro_elapsed = min(
+            self.stage_intro_duration,
+            self.stage_intro_elapsed + seconds,
+        )
+        if not self.stage_intro_success_active:
+            return
+        self.stage_intro_success_elapsed = min(
+            self.stage_intro_success_duration,
+            self.stage_intro_success_elapsed + seconds,
+        )
+        if (
+            self.stage_intro_success_elapsed
+            >= self.stage_intro_success_duration
+        ):
+            self.stage_intro_transition_elapsed = 0.0
+            self.pattern_input.clear()
+            self.state = "stage_intro_transition"
+
+    def _update_stage_intro_transition(self, seconds: float) -> None:
+        self.stage_intro_transition_elapsed = min(
+            self.stage_intro_transition_duration,
+            self.stage_intro_transition_elapsed + seconds,
+        )
+        if (
+            self.stage_intro_transition_elapsed
+            >= self.stage_intro_transition_duration
+        ):
+            self.stage_intro_pending = False
+            self.grid_intro_elapsed = 0.0
+            self.state = "playing"
 
     def _update_story(self, seconds: float) -> None:
         if self.story_video is None:
@@ -1373,11 +1650,35 @@ class ExorcismGame:
         ):
             self._prepare_game_after_story()
         if self.story_game_ready:
-            self.grid_intro_elapsed = min(
-                self.grid_intro_duration,
-                self.story_transition_elapsed - midpoint,
+            self.stage_intro_elapsed = min(
+                self.stage_intro_duration,
+                max(0.0, self.story_transition_elapsed - midpoint),
             )
         if self.story_transition_elapsed >= self.story_transition_duration:
+            self.state = "stage_intro" if self.stage_intro_pending else "playing"
+
+    def _update_stage_end_transition(self, seconds: float) -> None:
+        self.stage_end_transition_elapsed = min(
+            self.stage_end_transition_duration,
+            self.stage_end_transition_elapsed + seconds,
+        )
+        if (
+            self.stage_end_transition_elapsed
+            >= self.stage_end_transition_duration
+        ):
+            self._start_stage_end_video()
+
+    def _update_stage_end_video(self, seconds: float) -> None:
+        if self.stage_end_video is not None and not self.stage_end_video.ended:
+            self.stage_end_video.update(seconds)
+            if self.stage_end_video.ended:
+                if self.stage_end_video_channel is not None:
+                    self.stage_end_video_channel.stop()
+                    self.stage_end_video_channel = None
+                self._prepare_weaver_battle()
+                self.state = "playing"
+        elif self.stage_end_video is None or self.stage_end_video.ended:
+            self._prepare_weaver_battle()
             self.state = "playing"
 
     def _update_boss_return_transition(self, seconds: float) -> None:
@@ -1429,8 +1730,27 @@ class ExorcismGame:
         if boss.defeated:
             return
         self.boss_support_timer -= seconds
-        support_limits = (3, 4, 5)
-        support_limit = support_limits[boss.row_index]
+        if (
+            isinstance(boss, WeaverBoss)
+            and (
+                boss.pending_snarl_bursts > 0
+                or boss.pending_snarl_singles > 0
+            )
+        ):
+            spawned = self.session.spawn_weaver_snarl_burst(
+                SPAWN_POSITIONS,
+                PLAYER_POSITION,
+            )
+            for ghost in spawned:
+                self._play_ghost_spawn_sound(ghost)
+            if spawned:
+                self.boss_support_timer = 1.2
+            return
+        if isinstance(boss, WeaverBoss):
+            support_limit = 5
+        else:
+            support_limits = (4, 5, 6)
+            support_limit = support_limits[boss.row_index]
         if self.boss_support_timer <= 0 and len(self.session.ghosts) < support_limit:
             ghost = self.session.spawn_boss_support(
                 SPAWN_POSITIONS,
@@ -1439,8 +1759,12 @@ class ExorcismGame:
             if ghost is not None:
                 self._play_ghost_spawn_sound(ghost)
             intervals = (3.8, 2.7, 1.8)
+            if isinstance(boss, WeaverBoss):
+                interval = 5.0
+            else:
+                interval = (2.4, 1.9, 1.45)[boss.row_index]
             self.boss_support_timer = (
-                intervals[boss.row_index] if ghost is not None else 0.25
+                interval if ghost is not None else 0.25
             )
 
     def _update_defeat_transition(self, seconds: float) -> None:
@@ -1506,10 +1830,18 @@ class ExorcismGame:
             self._draw_settings()
         elif self.state == "tutorial":
             self._draw_tutorial()
+        elif self.state == "stage_intro":
+            self._draw_stage_intro()
+        elif self.state == "stage_intro_transition":
+            self._draw_stage_intro_transition()
         elif self.state == "story":
             self._draw_story()
         elif self.state == "story_transition":
             self._draw_story_transition()
+        elif self.state == "stage_end_transition":
+            self._draw_stage_end_transition()
+        elif self.state == "stage_end_video":
+            self._draw_stage_end_video()
         elif self.state == "boss_intro_transition":
             self._draw_boss_intro_transition()
         elif self.state == "boss_video":
@@ -1538,6 +1870,27 @@ class ExorcismGame:
         overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, round(255 * eased)))
         self.screen.blit(overlay, (0, 0))
+
+    def _draw_stage_end_transition(self) -> None:
+        self._draw_playing()
+        progress = min(
+            1.0,
+            self.stage_end_transition_elapsed
+            / self.stage_end_transition_duration,
+        )
+        eased = progress * progress * (3.0 - 2.0 * progress)
+        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, round(255 * eased)))
+        self.screen.blit(overlay, (0, 0))
+
+    def _draw_stage_end_video(self) -> None:
+        if (
+            self.stage_end_video is not None
+            and self.stage_end_video.surface is not None
+        ):
+            self.screen.blit(self.stage_end_video.surface, (0, 0))
+        else:
+            self.screen.fill((0, 0, 0))
 
     def _draw_boss_video(self) -> None:
         if self.boss_video is not None and self.boss_video.surface is not None:
@@ -1851,7 +2204,10 @@ class ExorcismGame:
     def _draw_story_transition(self) -> None:
         midpoint = self.story_transition_duration / 2.0
         if self.story_game_ready:
-            self._draw_playing()
+            if self.stage_intro_pending:
+                self._draw_stage_intro()
+            else:
+                self._draw_playing()
             fade = max(
                 0.0,
                 1.0
@@ -1862,6 +2218,23 @@ class ExorcismGame:
             fade = min(1.0, self.story_transition_elapsed / midpoint)
         overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, round(255 * fade)))
+        self.screen.blit(overlay, (0, 0))
+
+    def _draw_stage_intro_transition(self) -> None:
+        midpoint = self.stage_intro_transition_duration / 2.0
+        if self.stage_intro_transition_elapsed < midpoint:
+            self._draw_stage_intro()
+            fade = self.stage_intro_transition_elapsed / midpoint
+        else:
+            self._draw_playing()
+            fade = (
+                self.stage_intro_transition_duration
+                - self.stage_intro_transition_elapsed
+            ) / midpoint
+        eased = max(0.0, min(1.0, fade))
+        eased = eased * eased * (3.0 - 2.0 * eased)
+        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, round(255 * eased)))
         self.screen.blit(overlay, (0, 0))
 
     def _draw_tutorial(self) -> None:
@@ -1885,6 +2258,201 @@ class ExorcismGame:
         self._draw_tutorial_grid(eased, alpha)
         if self.tutorial_success_active:
             self._draw_tutorial_success()
+
+    def _draw_stage_intro(self) -> None:
+        if self.field_background is not None:
+            self.screen.blit(self.field_background, (0, 0))
+        else:
+            self.screen.fill(BG)
+            self._draw_background()
+        veil = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        veil.fill((5, 6, 16, 52))
+        self.screen.blit(veil, (0, 0))
+
+        progress = min(
+            1.0,
+            self.stage_intro_elapsed / self.stage_intro_duration,
+        )
+        eased = progress * progress * progress * (
+            progress * (progress * 6.0 - 15.0) + 10.0
+        )
+        alpha = round(255 * eased)
+        stage_title = self.font_large.render(
+            f"STAGE {self.session.stage}",
+            True,
+            WHITE,
+        )
+        stage_title.set_alpha(alpha)
+        self.screen.blit(
+            stage_title,
+            stage_title.get_rect(center=(WIDTH // 2, 48)),
+        )
+        self._draw_stage_intro_cards(progress, alpha)
+        self._draw_stage_intro_target(alpha)
+        self._draw_stage_intro_grid(eased, alpha)
+        if self.stage_intro_success_active:
+            self._draw_stage_intro_success()
+
+        black = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        black.fill((0, 0, 0, round(255 * (1.0 - eased))))
+        self.screen.blit(black, (0, 0))
+
+    def _draw_stage_intro_cards(self, progress: float, alpha: int) -> None:
+        source_cards = (
+            self.stage_one_cards
+            if self.session.stage == 1
+            else self.stage_two_cards
+        )
+        cards = [card for card in source_cards if card is not None]
+        target_xs = (340, 600, 860)
+        start_angles = (-4.0, 0.0, 4.0)
+        for index, (card, target_x, start_angle) in enumerate(
+            zip(cards, target_xs, start_angles)
+        ):
+            local = self._staggered_intro_progress(
+                progress,
+                index,
+                0.09,
+            )
+            scale = 0.68 + local * 0.32
+            scaled = pygame.transform.smoothscale(
+                card,
+                (
+                    max(1, round(card.get_width() * scale)),
+                    max(1, round(card.get_height() * scale)),
+                ),
+            )
+            image = pygame.transform.rotozoom(
+                scaled,
+                start_angle * (1.0 - local),
+                1.0,
+            )
+            image.set_alpha(round(alpha * local))
+            x = WIDTH // 2 + (target_x - WIDTH // 2) * local
+            y = 62 + round((1.0 - local) * 72)
+            self.screen.blit(
+                image,
+                image.get_rect(midtop=(round(x), y)),
+            )
+
+    def _staggered_intro_progress(
+        self,
+        progress: float,
+        index: int,
+        delay: float,
+    ) -> float:
+        local = max(
+            0.0,
+            min(1.0, (progress - index * delay) / (1.0 - index * delay)),
+        )
+        return local * local * local * (
+            local * (local * 6.0 - 15.0) + 10.0
+        )
+
+    def _draw_stage_intro_target(self, alpha: int) -> None:
+        layer = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        center = (WIDTH // 2, 450)
+        pygame.draw.rect(
+            layer,
+            (8, 10, 24, round(alpha * 0.58)),
+            pygame.Rect(center[0] - 78, center[1] - 38, 156, 76),
+            border_radius=16,
+        )
+        self._draw_pattern_on_surface(
+            layer,
+            self.stage_intro_pattern,
+            center,
+            25,
+            (*PATTERN_COLOR, alpha),
+            6,
+        )
+        self.screen.blit(layer, (0, 0))
+
+    def _draw_stage_intro_grid(self, eased: float, alpha: int) -> None:
+        layer = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        positions = [
+            (
+                self.stage_intro_center[0]
+                + (position[0] - self.stage_intro_center[0]) * eased,
+                self.stage_intro_center[1]
+                + (position[1] - self.stage_intro_center[1]) * eased,
+            )
+            for position in self.stage_intro_positions
+        ]
+        selected = self.pattern_input.nodes
+        for first, second in zip(selected, selected[1:]):
+            self._draw_neon_line(
+                layer,
+                positions[first],
+                positions[second],
+                alpha,
+            )
+        if self.pattern_input.dragging and selected:
+            start = positions[selected[-1]]
+            mouse = pygame.mouse.get_pos()
+            dx = mouse[0] - start[0]
+            dy = mouse[1] - start[1]
+            distance = math.hypot(dx, dy)
+            end = (
+                (
+                    start[0] + dx / distance * self.stage_intro_gap,
+                    start[1] + dy / distance * self.stage_intro_gap,
+                )
+                if distance > self.stage_intro_gap
+                else mouse
+            )
+            self._draw_neon_line(layer, start, end, min(alpha, 190))
+        for index, position in enumerate(positions):
+            active = index in selected
+            pygame.draw.circle(
+                layer,
+                (13, 15, 28, round(alpha * 0.28)),
+                position,
+                17,
+            )
+            pygame.draw.circle(
+                layer,
+                (*CYAN, alpha) if active else (180, 184, 205, alpha // 2),
+                position,
+                12,
+                3,
+            )
+            if active:
+                pygame.draw.circle(layer, (*CYAN, alpha), position, 5)
+        self.screen.blit(layer, (0, 0))
+
+    def _draw_stage_intro_success(self) -> None:
+        progress = min(
+            1.0,
+            self.stage_intro_success_elapsed
+            / self.stage_intro_success_duration,
+        )
+        eased = 1.0 - (1.0 - progress) ** 3
+        fade = (
+            progress / 0.25
+            if progress < 0.25
+            else max(0.0, (1.0 - progress) / 0.75)
+        )
+        alpha = round(255 * min(1.0, fade))
+        gap = round(24 + eased * 112)
+        layer = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        self._draw_pattern_on_surface(
+            layer,
+            self.stage_intro_pattern,
+            self.stage_intro_center,
+            gap,
+            (*GOLD, alpha),
+            9,
+        )
+        glow = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        pygame.draw.circle(
+            glow,
+            (*GOLD, alpha // 9),
+            self.stage_intro_center,
+            round(60 + eased * 175),
+        )
+        self.screen.blit(glow, (0, 0))
+        self.screen.blit(layer, (0, 0))
 
     def _draw_tutorial_success(self) -> None:
         progress = min(
@@ -2058,8 +2626,9 @@ class ExorcismGame:
         self.pause_restart_button.draw(self.screen, self.font)
 
     def _draw_stage_background(self) -> None:
-        if self.stage_background is not None:
-            self.screen.blit(self.stage_background, (0, 0))
+        background = self.stage_backgrounds.get(self.session.stage)
+        if background is not None:
+            self.screen.blit(background, (0, 0))
             shade = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
             shade.fill((8, 8, 18, 58))
             self.screen.blit(shade, (0, 0))
@@ -2088,7 +2657,10 @@ class ExorcismGame:
         ):
             self._draw_ghost(ghost)
         if self.session.boss is not None:
-            self._draw_piton(self.session.boss)
+            if isinstance(self.session.boss, WeaverBoss):
+                self._draw_weaver(self.session.boss)
+            else:
+                self._draw_piton(self.session.boss)
 
         self._draw_large_grid()
 
@@ -2125,6 +2697,65 @@ class ExorcismGame:
         self.screen.blit(name, name.get_rect(center=(x, y - 122)))
         self._draw_piton_patterns(boss, (x, y - 82), alpha)
 
+    def _draw_weaver(self, boss: WeaverBoss) -> None:
+        alpha = boss.alpha
+        if alpha <= 0:
+            return
+        x = round(boss.x)
+        y = round(boss.y + math.sin(boss.pulse * 1.6) * 4)
+        self._draw_weaver_web_lanes(boss, alpha)
+        aura = pygame.Surface((250, 250), pygame.SRCALPHA)
+        pygame.draw.circle(aura, (96, 86, 150, alpha // 5), (125, 125), 118)
+        pygame.draw.circle(aura, (205, 195, 255, alpha // 2), (125, 125), 100, 3)
+        self.screen.blit(aura, aura.get_rect(center=(x, y)))
+        state = (
+            "defeated"
+            if boss.defeated
+            else "attacked"
+            if boss.is_hit_reacting or boss.knockback_active
+            else "idle"
+        )
+        source_image = self.weaver_images.get(state)
+        if source_image is not None:
+            image = source_image.copy()
+            image.set_alpha(alpha)
+            self.screen.blit(image, image.get_rect(center=(x, y)))
+        else:
+            pygame.draw.circle(self.screen, (76, 70, 125), (x, y), boss.radius)
+        name = self.font.render(
+            f"WEAVER  WEB {boss.row_number}/4",
+            True,
+            (220, 210, 255),
+        )
+        name.set_alpha(alpha)
+        self.screen.blit(name, name.get_rect(center=(x, y - 128)))
+        self._draw_piton_patterns(boss, (x, y - 88), alpha)
+
+    def _draw_weaver_web_lanes(self, boss: WeaverBoss, alpha: int) -> None:
+        if not boss.active_web_lanes:
+            return
+        layer = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        for lane, remaining in boss.active_web_lanes.items():
+            angle = lane * math.tau / 8.0
+            center = (
+                boss.target_x + math.cos(angle) * 410,
+                boss.target_y + math.sin(angle) * 300,
+            )
+            lane_alpha = round(alpha * min(1.0, remaining / 1.0) * 0.55)
+            if self.weaver_web_image is not None:
+                image = self.weaver_web_image.copy()
+                image.set_alpha(lane_alpha)
+                layer.blit(image, image.get_rect(center=center))
+            else:
+                pygame.draw.circle(
+                    layer,
+                    (220, 230, 255, lane_alpha),
+                    center,
+                    68,
+                    4,
+                )
+        self.screen.blit(layer, (0, 0))
+
     def _draw_piton_patterns(
         self,
         boss: PitonBoss,
@@ -2155,14 +2786,26 @@ class ExorcismGame:
             )
             color = (120, 84, 145) if index in boss.sealed_slots else PATTERN_COLOR
             pygame.draw.rect(layer, (*color, 145), frame, 2, border_radius=5)
-            self._draw_pattern_on_surface(
-                layer,
-                pattern,
-                pattern_center,
-                11,
-                (*color, opacity),
-                5,
-            )
+            if pattern and isinstance(pattern[0], tuple):
+                for layer_index, sub_pattern in enumerate(pattern):
+                    layer_color = CYAN if layer_index == 0 else GOLD
+                    self._draw_compact_pattern_skeleton(
+                        layer,
+                        sub_pattern,
+                        pattern_center,
+                        11,
+                        (*layer_color, opacity),
+                        (10, 8, 22, opacity),
+                    )
+            else:
+                self._draw_compact_pattern_skeleton(
+                    layer,
+                    pattern,
+                    pattern_center,
+                    11,
+                    (*color, opacity),
+                    (10, 8, 22, opacity),
+                )
         for first, last in self._contiguous_ranges(boss.sealed_slots):
             seal_rect = pygame.Rect(
                 start_x + first * slot_width + 2,
@@ -2183,22 +2826,45 @@ class ExorcismGame:
                 3,
                 border_radius=7,
             )
-            pygame.draw.line(
-                layer,
-                (226, 107, 255, 210),
-                seal_rect.topleft,
-                seal_rect.bottomright,
-                2,
-            )
-            pygame.draw.line(
-                layer,
-                (226, 107, 255, 210),
-                seal_rect.topright,
-                seal_rect.bottomleft,
-                2,
-            )
+            self._draw_inverted_cross_seal(layer, seal_rect, 235)
         layer.set_alpha(opacity)
         self.screen.blit(layer, (0, 0))
+
+    def _draw_inverted_cross_seal(
+        self,
+        surface: pygame.Surface,
+        rect: pygame.Rect,
+        alpha: int,
+    ) -> None:
+        color = (226, 107, 255, alpha)
+        center_x = rect.centerx
+        top = rect.top + 7
+        bottom = rect.bottom - 7
+        cross_y = rect.top + round(rect.height * 0.62)
+        arm = min(18, max(9, rect.width // 7))
+        width = 5
+        pygame.draw.line(
+            surface,
+            color,
+            (center_x, top),
+            (center_x, bottom),
+            width,
+        )
+        pygame.draw.line(
+            surface,
+            color,
+            (center_x - arm, cross_y),
+            (center_x + arm, cross_y),
+            width,
+        )
+        radius = width // 2
+        for point in (
+            (center_x, top),
+            (center_x, bottom),
+            (center_x - arm, cross_y),
+            (center_x + arm, cross_y),
+        ):
+            pygame.draw.circle(surface, color, point, radius)
 
     def _contiguous_ranges(
         self,
@@ -2373,7 +3039,15 @@ class ExorcismGame:
             return index + (1 if forbidden_count and index >= 1 else 0)
 
         entries: list[
-            tuple[tuple[int, ...], tuple[int, int, int], tuple[float, float], float, bool]
+            tuple[
+                tuple[int, ...],
+                tuple[int, int, int],
+                tuple[float, float],
+                float,
+                bool,
+                bool,
+                bool,
+            ]
         ] = []
         if ghost.removed_pattern:
             old_start = layout_start(old_count)
@@ -2383,6 +3057,8 @@ class ExorcismGame:
                     PATTERN_COLOR,
                     (old_start + visual_slot(0) * 54 + 27, center[1]),
                     1.0 - transition,
+                    ghost.removed_start_locked,
+                    ghost.removed_partial,
                     False,
                 )
             )
@@ -2396,7 +3072,17 @@ class ExorcismGame:
                         PATTERN_COLOR,
                         (old_x + (new_x - old_x) * easing, center[1]),
                         1.0,
-                        index == 0,
+                        (
+                            ghost.start_locked_slots[index]
+                            if index < len(ghost.start_locked_slots)
+                            else False
+                        ),
+                        (
+                            ghost.partial_slots[index]
+                            if index < len(ghost.partial_slots)
+                            else False
+                        ),
+                        index in ghost.sealed_slots,
                     )
                 )
         else:
@@ -2411,7 +3097,17 @@ class ExorcismGame:
                             center[1],
                         ),
                         1.0,
-                        index == 0,
+                        (
+                            ghost.start_locked_slots[index]
+                            if index < len(ghost.start_locked_slots)
+                            else False
+                        ),
+                        (
+                            ghost.partial_slots[index]
+                            if index < len(ghost.partial_slots)
+                            else False
+                        ),
+                        index in ghost.sealed_slots,
                     )
                 )
 
@@ -2424,6 +3120,8 @@ class ExorcismGame:
                     RED,
                     (forbidden_x, center[1]),
                     1.0 - transition,
+                    False,
+                    False,
                     False,
                 )
             )
@@ -2438,10 +3136,20 @@ class ExorcismGame:
                     (forbidden_x, center[1]),
                     1.0,
                     False,
+                    False,
+                    False,
                 )
             )
 
-        for pattern, color, pattern_center, entry_alpha, is_first_required in entries:
+        for (
+            pattern,
+            color,
+            pattern_center,
+            entry_alpha,
+            is_start_locked,
+            is_partial,
+            is_sealed,
+        ) in entries:
             crease_axis = self._crease_axis_for_pattern(ghost, pattern)
             display_pattern = self._display_pattern_for_ghost(
                 ghost, pattern, crease_axis
@@ -2496,7 +3204,7 @@ class ExorcismGame:
                     (list(zip(pattern_layers[0], pattern_layers[0][1:])), 0.95, CYAN),
                     (list(zip(pattern_layers[1], pattern_layers[1][1:])), 0.95, GOLD),
                 ]
-            elif ghost.kind is GhostKind.PARTIAL and is_first_required:
+            elif is_partial:
                 segments = list(zip(display_pattern, display_pattern[1:]))
                 blend = (math.sin(ghost.pulse * 1.8) + 1.0) / 2.0
                 segment_groups = [
@@ -2522,6 +3230,7 @@ class ExorcismGame:
             else:
                 segments = list(zip(display_pattern, display_pattern[1:]))
                 segment_groups = [(segments, 1.0, color)]
+            node_radius = 4
             if crease_axis:
                 self._draw_crease_axis(layer, frame_rect, crease_axis, color, entry_alpha)
             for group, group_alpha, group_color in segment_groups:
@@ -2534,20 +3243,76 @@ class ExorcismGame:
                         (*group_color, draw_alpha),
                         nodes[first],
                         nodes[second],
-                        6,
+                        4,
                     )
                     pygame.draw.circle(
-                        layer, (*group_color, draw_alpha), nodes[first], 3
+                        layer,
+                        (13, 15, 28, draw_alpha),
+                        nodes[first],
+                        node_radius,
                     )
                     pygame.draw.circle(
-                        layer, (*group_color, draw_alpha), nodes[second], 3
+                        layer,
+                        (*group_color, draw_alpha),
+                        nodes[first],
+                        node_radius,
+                        2,
                     )
-            if ghost.strict_start and display_pattern and is_first_required:
+                    pygame.draw.circle(
+                        layer,
+                        (13, 15, 28, draw_alpha),
+                        nodes[second],
+                        node_radius,
+                    )
+                    pygame.draw.circle(
+                        layer,
+                        (*group_color, draw_alpha),
+                        nodes[second],
+                        node_radius,
+                        2,
+                    )
+            if is_start_locked and display_pattern:
+                start_node = nodes[display_pattern[0]]
                 pygame.draw.circle(
                     layer,
-                    (*color, round(255 * entry_alpha)),
-                    nodes[display_pattern[0]],
-                    8,
+                    (131, 192, 253, round(225 * entry_alpha)),
+                    start_node,
+                    node_radius,
+                )
+                pygame.draw.circle(
+                    layer,
+                    (131, 192, 253, round(245 * entry_alpha)),
+                    start_node,
+                    node_radius,
+                    2,
+                )
+            if is_sealed:
+                seal_rect = frame_rect.inflate(2, 2)
+                pygame.draw.rect(
+                    layer,
+                    (91, 32, 118, round(92 * entry_alpha)),
+                    seal_rect,
+                    border_radius=5,
+                )
+                pygame.draw.rect(
+                    layer,
+                    (226, 107, 255, round(235 * entry_alpha)),
+                    seal_rect,
+                    3,
+                    border_radius=5,
+                )
+                pygame.draw.line(
+                    layer,
+                    (226, 107, 255, round(220 * entry_alpha)),
+                    seal_rect.topleft,
+                    seal_rect.bottomright,
+                    2,
+                )
+                pygame.draw.line(
+                    layer,
+                    (226, 107, 255, round(220 * entry_alpha)),
+                    seal_rect.topright,
+                    seal_rect.bottomleft,
                     2,
                 )
         layer.set_alpha(opacity)
@@ -2626,7 +3391,10 @@ class ExorcismGame:
         score = self.font.render(f"SCORE  {self.session.score:06d}", True, WHITE)
         self.screen.blit(score, (255, 34))
         if self.session.boss_battle and self.session.boss is not None:
-            wave_text = f"PITON  ROW {self.session.boss.row_number}/3"
+            if isinstance(self.session.boss, WeaverBoss):
+                wave_text = f"WEAVER  ROW {self.session.boss.row_number}/4"
+            else:
+                wave_text = f"PITON  ROW {self.session.boss.row_number}/3"
         else:
             wave_text = (
                 f"STAGE {self.session.stage}  WAVE {self.session.wave}"
@@ -2960,6 +3728,46 @@ class ExorcismGame:
             pygame.draw.line(surface, color, nodes[first], nodes[second], width)
         for index in pattern:
             pygame.draw.circle(surface, color, nodes[index], max(5, width // 2 + 1))
+
+    def _draw_compact_pattern_skeleton(
+        self,
+        surface: pygame.Surface,
+        pattern: tuple[int, ...],
+        center: tuple[int, int],
+        gap: int,
+        color: tuple[int, ...],
+        node_fill: tuple[int, ...],
+    ) -> None:
+        nodes = [
+            (
+                center[0] + (index % 3 - 1) * gap,
+                center[1] + (index // 3 - 1) * gap,
+            )
+            for index in range(9)
+        ]
+        node_radius = 4
+        for first, second in zip(pattern, pattern[1:]):
+            pygame.draw.line(
+                surface,
+                color,
+                nodes[first],
+                nodes[second],
+                4,
+            )
+        for index in pattern:
+            pygame.draw.circle(
+                surface,
+                node_fill,
+                nodes[index],
+                node_radius,
+            )
+            pygame.draw.circle(
+                surface,
+                color,
+                nodes[index],
+                node_radius,
+                2,
+            )
 
     def _draw_demo_pattern(
         self,

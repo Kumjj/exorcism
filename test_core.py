@@ -10,9 +10,22 @@ from core import (
     PatternResult,
     SpellManager,
     SpellType,
+    STAGE_TWO_PATTERN_POOL,
+    WEAVER_LAYERED_PATTERN_POOL,
+    WEAVER_PATTERN_POOL,
+    WeaverBoss,
     mirrored_pattern,
     pattern_attempt_matches,
 )
+
+
+def has_diagonal_edge(pattern: tuple[int, ...]) -> bool:
+    for first, second in zip(pattern, pattern[1:]):
+        first_row, first_col = divmod(first, 3)
+        second_row, second_col = divmod(second, 3)
+        if abs(first_row - second_row) == 1 and abs(first_col - second_col) == 1:
+            return True
+    return False
 
 
 class PatternInputTests(unittest.TestCase):
@@ -164,7 +177,7 @@ class GameSessionTests(unittest.TestCase):
         self.assertEqual(result, PatternResult.MISSED)
         self.assertFalse(locked.vanishing)
 
-    def test_start_locked_can_apply_to_multiple_patterns_without_changing_them(self) -> None:
+    def test_start_lock_stays_attached_to_its_original_pattern(self) -> None:
         locked = Ghost(
             GHOST_SPECS[0],
             700,
@@ -181,10 +194,49 @@ class GameSessionTests(unittest.TestCase):
         self.assertEqual(result, PatternResult.HIT)
         self.assertEqual(locked.kind, GhostKind.START_LOCKED)
         self.assertEqual(locked.remaining_patterns, [(3, 4, 5)])
+        self.assertEqual(locked.start_locked_slots, [False])
         result = self.session.judge_pattern((5, 4, 3))
-        self.assertEqual(result, PatternResult.MISSED)
-        result = self.session.judge_pattern((3, 4, 5))
         self.assertEqual(result, PatternResult.HIT)
+
+    def test_start_lock_can_be_explicitly_attached_to_multiple_patterns(self) -> None:
+        locked = Ghost(
+            GHOST_SPECS[0],
+            700,
+            200,
+            400,
+            300,
+            remaining_patterns=[(0, 1, 2), (3, 4, 5)],
+            kind=GhostKind.START_LOCKED,
+            start_locked_slots=[True, True],
+        )
+        self.session.ghosts = [locked]
+
+        self.assertEqual(
+            self.session.judge_pattern((0, 1, 2)),
+            PatternResult.HIT,
+        )
+        self.assertEqual(
+            self.session.judge_pattern((5, 4, 3)),
+            PatternResult.MISSED,
+        )
+
+    def test_partial_gimmick_does_not_move_to_the_next_pattern(self) -> None:
+        partial = Ghost(
+            GHOST_SPECS[0],
+            700,
+            200,
+            400,
+            300,
+            remaining_patterns=[(0, 1, 2), (3, 4, 5)],
+            kind=GhostKind.PARTIAL,
+        )
+
+        self.assertEqual(partial.partial_slots, [True, False])
+        partial.remove_first_pattern()
+
+        self.assertTrue(partial.removed_partial)
+        self.assertFalse(partial.partial_pattern)
+        self.assertEqual(partial.partial_slots, [False])
 
     def test_heal_consumes_power_and_restores_health(self) -> None:
         self.session.health = 2
@@ -301,20 +353,12 @@ class GameSessionTests(unittest.TestCase):
                 <= {
                     GhostKind.SLOWPOKE,
                     GhostKind.START_LOCKED,
-                    GhostKind.CREEP,
                     GhostKind.FORBIDDEN,
                 }
             )
+            self.assertNotIn(GhostKind.CREEP, expected_kinds)
 
-    def test_stage_two_uses_three_progressive_waves(self) -> None:
-        old_kinds = {
-            GhostKind.SLOWPOKE,
-            GhostKind.START_LOCKED,
-            GhostKind.CREEP,
-            GhostKind.FORBIDDEN,
-        }
-        old_kind_counts = []
-
+    def test_stage_two_mixes_more_reversed_and_normal_ghosts(self) -> None:
         for wave, expected_kinds in GameSession.STAGE_TWO_WAVES.items():
             self.session.stage = 2
             self.session.wave = wave
@@ -324,12 +368,15 @@ class GameSessionTests(unittest.TestCase):
 
             self.assertEqual(tuple(self.session.kind_queue), expected_kinds)
             self.assertEqual(len(self.session.spawn_queue), len(expected_kinds))
-            old_kind_counts.append(
-                sum(kind in old_kinds for kind in expected_kinds)
-            )
+            self.assertGreaterEqual(expected_kinds.count(GhostKind.CREASE), 1)
+            self.assertIn(GhostKind.SLOWPOKE, expected_kinds)
 
-        self.assertEqual(old_kind_counts[:2], [1, 1])
-        self.assertGreater(old_kind_counts[2], old_kind_counts[1])
+        self.assertGreaterEqual(
+            GameSession.STAGE_TWO_WAVES[3].count(GhostKind.CREASE),
+            3,
+        )
+        self.assertIn(GhostKind.CREEP, GameSession.STAGE_TWO_WAVES[2])
+        self.assertIn(GhostKind.CREEP, GameSession.STAGE_TWO_WAVES[3])
 
     def test_start_stage_two_resets_queues_and_fills_first_wave(self) -> None:
         self.session.ghosts = [self.normal]
@@ -349,6 +396,7 @@ class GameSessionTests(unittest.TestCase):
 
     def test_stage_two_starts_with_longer_two_pattern_ghosts(self) -> None:
         self.session.start_stage(2)
+        sealed_count = 0
 
         while self.session.spawn_queue:
             ghost = self.session.spawn_next(
@@ -357,10 +405,377 @@ class GameSessionTests(unittest.TestCase):
             )
             self.assertIsNotNone(ghost)
             self.assertGreaterEqual(len(ghost.remaining_patterns), 2)
+            sealed_count += bool(ghost.sealed_slots)
             for pattern in ghost.remaining_patterns:
                 self.assertFalse(isinstance(pattern[0], tuple))
                 self.assertGreaterEqual(len(pattern), 4)
             self.session.ghosts.clear()
+        self.assertEqual(
+            sealed_count,
+            GameSession.STAGE_TWO_SEAL_LIMITS[1],
+        )
+
+    def test_seal_support_spawns_when_only_blocked_ghosts_remain(self) -> None:
+        blocked = Ghost(
+            GHOST_SPECS[0],
+            700,
+            200,
+            400,
+            300,
+            remaining_patterns=[(0, 1, 2)],
+            sealed_slots={0},
+        )
+        self.session.ghosts = [blocked]
+        self.session.spawn_queue.clear()
+        self.session.kind_queue.clear()
+        self.session.spells.holy_power = 0
+
+        support = self.session.spawn_seal_support(
+            ((900.0, 500.0),),
+            (400.0, 300.0),
+        )
+
+        self.assertIsNotNone(support)
+        self.assertEqual(support.kind, GhostKind.SLOWPOKE)
+        self.assertEqual(len(support.remaining_patterns), 1)
+        self.assertEqual(len(support.remaining_patterns[0]), 3)
+        self.assertEqual(support.sealed_slots, set())
+
+    def test_seal_support_does_not_spawn_when_sanctify_is_affordable(self) -> None:
+        blocked = Ghost(
+            GHOST_SPECS[0],
+            700,
+            200,
+            400,
+            300,
+            remaining_patterns=[(0, 1, 2)],
+            sealed_slots={0},
+        )
+        sanctify = next(
+            spell
+            for spell in SpellManager.SPELLS
+            if spell.spell_type is SpellType.NULLIFY
+        )
+        self.session.ghosts = [blocked]
+        self.session.spells.holy_power = sanctify.cost
+
+        self.assertFalse(self.session.needs_seal_support())
+
+    def test_regular_ghost_can_seal_only_one_pattern(self) -> None:
+        ghost = Ghost(
+            GHOST_SPECS[0],
+            700,
+            200,
+            400,
+            300,
+            remaining_patterns=[(0, 1, 2), (3, 4, 5), (6, 7, 8)],
+        )
+
+        self.assertTrue(ghost.apply_random_seal(self.session.rng))
+        self.assertFalse(ghost.apply_random_seal(self.session.rng))
+        self.assertEqual(len(ghost.sealed_slots), 1)
+
+    def test_stage_one_adds_one_sealed_ghost_only_in_final_wave(self) -> None:
+        for wave, expected_seals in (
+            (1, 0),
+            (2, 0),
+            (3, 1),
+        ):
+            self.session.stage = 1
+            self.session.wave = wave
+            self.session.spawn_queue.clear()
+            self.session.kind_queue.clear()
+            self.session.ghosts.clear()
+            self.session.fill_wave()
+            sealed_count = 0
+
+            while self.session.spawn_queue:
+                ghost = self.session.spawn_next(
+                    ((800.0, 300.0),),
+                    (400.0, 300.0),
+                )
+                self.assertIsNotNone(ghost)
+                sealed_count += bool(ghost.sealed_slots)
+                self.session.ghosts.clear()
+
+            self.assertEqual(sealed_count, expected_seals)
+
+    def test_starting_a_new_stage_resets_holy_power_and_cooldowns(self) -> None:
+        self.session.spells.holy_power = SpellManager.MAX_POWER
+        self.session.spells.cooldowns[SpellType.NULLIFY] = 5.0
+
+        self.session.start_stage(2)
+
+        self.assertEqual(self.session.spells.holy_power, 0)
+        self.assertTrue(
+            all(
+                remaining == 0
+                for remaining in self.session.spells.cooldowns.values()
+            )
+        )
+
+    def test_weaver_has_four_rows_of_six_harder_patterns(self) -> None:
+        boss = self.session.start_weaver_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+
+        self.assertIsInstance(boss, WeaverBoss)
+        self.assertEqual(len(boss.rows), 4)
+        self.assertTrue(all(len(row) == 6 for row in boss.rows))
+        self.assertTrue(
+            any(isinstance(pattern[0], tuple) for row in boss.rows for pattern in row)
+        )
+
+    def test_weaver_rows_include_mirrored_patterns(self) -> None:
+        mirrored_by_axis = {
+            axis: {mirrored_pattern(pattern, axis) for pattern in WEAVER_PATTERN_POOL}
+            for axis in ("x", "y", "origin")
+        }
+        mirrored = {
+            mirrored_pattern(pattern, axis)
+            for pattern in WEAVER_PATTERN_POOL
+            for axis in ("x", "y", "origin")
+        }
+        boss = self.session.start_weaver_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+
+        self.assertTrue(
+            any(
+                pattern in mirrored
+                for row in boss.rows
+                for pattern in row
+                if pattern and isinstance(pattern[0], int)
+            )
+        )
+        for row in boss.rows:
+            simple_patterns = [
+                pattern
+                for pattern in row
+                if pattern and isinstance(pattern[0], int)
+            ]
+            for axis in ("x", "y", "origin"):
+                self.assertTrue(
+                    any(pattern in mirrored_by_axis[axis] for pattern in simple_patterns)
+                )
+
+    def test_weaver_single_patterns_use_readable_diagonal_paths(self) -> None:
+        for pattern in WEAVER_PATTERN_POOL:
+            self.assertLessEqual(len(pattern), 6)
+            self.assertTrue(has_diagonal_edge(pattern))
+
+    def test_stage_two_pattern_pool_reduces_straight_lines(self) -> None:
+        self.assertTrue(
+            all(has_diagonal_edge(pattern) for pattern in STAGE_TWO_PATTERN_POOL)
+        )
+
+    def test_weaver_layered_patterns_carry_extra_complexity(self) -> None:
+        self.assertTrue(
+            all(
+                sum(len(layer) for layer in layered) >= 7
+                for layered in WEAVER_LAYERED_PATTERN_POOL
+            )
+        )
+
+    def test_weaver_timed_snarl_burst_spawns_three_snarl_ghosts(self) -> None:
+        boss = self.session.start_weaver_battle(
+            ((800.0, 300.0), (950.0, 300.0), (1100.0, 300.0)),
+            (400.0, 300.0),
+        )
+        boss.pending_snarl_bursts = 1
+
+        spawned = self.session.spawn_weaver_snarl_burst(
+            ((800.0, 300.0), (950.0, 300.0), (1100.0, 300.0)),
+            (400.0, 300.0),
+        )
+
+        self.assertEqual(len(spawned), 3)
+        self.assertTrue(all(ghost.kind is GhostKind.SNARL for ghost in spawned))
+        self.assertEqual(boss.pending_snarl_bursts, 0)
+
+    def test_weaver_row_clear_spawns_one_snarl_ghost(self) -> None:
+        boss = self.session.start_weaver_battle(
+            ((800.0, 300.0), (950.0, 300.0), (1100.0, 300.0)),
+            (400.0, 300.0),
+        )
+        boss.pending_snarl_singles = 1
+
+        spawned = self.session.spawn_weaver_snarl_burst(
+            ((800.0, 300.0), (950.0, 300.0), (1100.0, 300.0)),
+            (400.0, 300.0),
+        )
+
+        self.assertEqual(len(spawned), 1)
+        self.assertEqual(spawned[0].kind, GhostKind.SNARL)
+        self.assertEqual(boss.pending_snarl_singles, 0)
+
+    def test_weaver_schedules_snarl_bursts_every_forty_seconds(self) -> None:
+        boss = self.session.start_weaver_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.spawn_elapsed = boss.spawn_duration
+        boss.snarl_timer = 0.0
+
+        boss.update(0.01, self.session.rng)
+
+        self.assertEqual(boss.pending_snarl_bursts, 1)
+        self.assertAlmostEqual(boss.snarl_timer, 39.99)
+
+    def test_weaver_web_attack_places_two_lanes(self) -> None:
+        boss = self.session.start_weaver_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.spawn_elapsed = boss.spawn_duration
+        boss.web_lane_timer = 0.0
+
+        boss.update(0.01, self.session.rng)
+
+        self.assertEqual(len(boss.active_web_lanes), 2)
+
+    def test_weaver_pattern_seal_is_delayed_by_twenty_seconds(self) -> None:
+        boss = self.session.start_weaver_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.spawn_elapsed = boss.spawn_duration
+
+        self.assertEqual(boss.seal_timer, 20.0)
+        self.assertEqual(boss.seal_interval, 20.0)
+
+    def test_weaver_web_slows_spell_cooldown_until_sanctified(self) -> None:
+        boss = self.session.start_weaver_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.pending_web_spell = SpellType.REPEL
+
+        self.session.update_boss(0.1, ((800.0, 300.0),), (400.0, 300.0), 44)
+        self.assertIn(SpellType.REPEL, self.session.spells.cooldown_drags)
+
+        sanctify = next(
+            spell
+            for spell in SpellManager.SPELLS
+            if spell.spell_type is SpellType.NULLIFY
+        )
+        self.session.spells.holy_power = sanctify.cost
+        self.assertEqual(
+            self.session.judge_pattern(sanctify.pattern),
+            PatternResult.SPELL,
+        )
+        self.assertEqual(self.session.spells.cooldown_drags, {})
+
+    def test_weaver_sanctify_clears_all_pattern_seals_after_piton(self) -> None:
+        boss = self.session.start_weaver_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.sealed_slots = {0, 1, 3}
+        boss.active_web_lanes[0] = 5.0
+        sanctify = next(
+            spell
+            for spell in SpellManager.SPELLS
+            if spell.spell_type is SpellType.NULLIFY
+        )
+        self.session.spells.holy_power = sanctify.cost
+
+        self.assertEqual(
+            self.session.judge_pattern(sanctify.pattern),
+            PatternResult.SPELL,
+        )
+
+        self.assertEqual(boss.sealed_slots, set())
+        self.assertEqual(boss.active_web_lanes, {})
+        self.assertEqual(boss.recently_purified_slots, {0, 1, 3})
+
+    def test_weaver_does_not_reseal_recently_purified_slots(self) -> None:
+        boss = self.session.start_weaver_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.sealed_slots = {0, 1}
+        sanctify = next(
+            spell
+            for spell in SpellManager.SPELLS
+            if spell.spell_type is SpellType.NULLIFY
+        )
+        self.session.spells.holy_power = sanctify.cost
+        self.session.judge_pattern(sanctify.pattern)
+
+        boss.seal_timer = 0.0
+        boss.update(0.01, self.session.rng)
+
+        self.assertTrue(boss.sealed_slots)
+        self.assertTrue(boss.sealed_slots.isdisjoint({0, 1}))
+
+    def test_weaver_web_lane_slows_ghosts_in_that_direction(self) -> None:
+        boss = self.session.start_weaver_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.active_web_lanes[0] = 5.0
+        ghost = Ghost(
+            GHOST_SPECS[0],
+            boss.target_x + 260,
+            boss.target_y,
+            boss.target_x,
+            boss.target_y,
+        )
+        ghost.spawn_elapsed = ghost.spawn_duration
+        self.session.ghosts = [ghost]
+
+        self.session.update_boss(0.1, ((800.0, 300.0),), (400.0, 300.0), 44)
+
+        self.assertGreaterEqual(ghost.slow_remaining, 1.0)
+
+    def test_regular_ghost_seal_blocks_pattern_and_moves_with_slot(self) -> None:
+        ghost = Ghost(
+            GHOST_SPECS[0],
+            700,
+            200,
+            400,
+            300,
+            remaining_patterns=[(0, 1, 2), (3, 4, 5)],
+            sealed_slots={1},
+        )
+        self.session.ghosts = [ghost]
+
+        self.assertEqual(
+            self.session.judge_pattern((0, 1, 2)),
+            PatternResult.HIT,
+        )
+        self.assertEqual(ghost.sealed_slots, {0})
+        self.assertEqual(
+            self.session.judge_pattern((3, 4, 5)),
+            PatternResult.MISSED,
+        )
+
+    def test_sanctify_removes_regular_ghost_pattern_seal(self) -> None:
+        ghost = Ghost(
+            GHOST_SPECS[0],
+            700,
+            200,
+            400,
+            300,
+            remaining_patterns=[(0, 1, 2)],
+            sealed_slots={0},
+        )
+        spell = next(
+            spell
+            for spell in SpellManager.SPELLS
+            if spell.spell_type is SpellType.NULLIFY
+        )
+        self.session.ghosts = [ghost]
+        self.session.spells.holy_power = spell.cost
+
+        self.assertEqual(
+            self.session.judge_pattern(spell.pattern),
+            PatternResult.SPELL,
+        )
+        self.assertEqual(ghost.sealed_slots, set())
 
     def test_third_wave_uses_advanced_stage_one_rules(self) -> None:
         self.session.wave = 3
@@ -396,15 +811,15 @@ class GameSessionTests(unittest.TestCase):
         self.assertEqual(self.session.wave, 3)
         self.assertEqual(len(self.session.spawn_queue), 0)
 
-    def test_piton_has_three_rows_of_seven_patterns(self) -> None:
+    def test_piton_has_three_rows_of_five_patterns(self) -> None:
         boss = self.session.start_boss_battle(
             ((800.0, 300.0),),
             (400.0, 300.0),
         )
 
         self.assertEqual(len(boss.rows), 3)
-        self.assertTrue(all(len(row) == 7 for row in boss.rows))
-        self.assertEqual(len(boss.patterns), 7)
+        self.assertTrue(all(len(row) == 5 for row in boss.rows))
+        self.assertEqual(len(boss.patterns), 5)
 
     def test_repel_spell_pushes_piton_away_smoothly(self) -> None:
         boss = self.session.start_boss_battle(
@@ -457,7 +872,7 @@ class GameSessionTests(unittest.TestCase):
         )
         self.assertEqual(len(boss.sealed_slots), 2)
 
-    def test_piton_refills_seven_patterns_for_three_rows(self) -> None:
+    def test_piton_refills_five_patterns_for_three_rows(self) -> None:
         boss = self.session.start_boss_battle(
             ((800.0, 300.0),),
             (400.0, 300.0),
@@ -465,12 +880,12 @@ class GameSessionTests(unittest.TestCase):
         boss.spawn_elapsed = boss.spawn_duration
 
         for row in range(3):
-            for _ in range(7):
+            for _ in range(5):
                 boss.sealed_slots.clear()
                 self.session.judge_pattern(boss.patterns[0])
             if row < 2:
                 self.assertEqual(boss.row_number, row + 2)
-                self.assertEqual(len(boss.patterns), 7)
+                self.assertEqual(len(boss.patterns), 5)
 
         self.assertTrue(boss.defeated)
 
@@ -524,12 +939,47 @@ class GameSessionTests(unittest.TestCase):
             boss.apply_random_seal(self.session.rng)
 
         self.assertEqual(len(boss.sealed_slots), 4)
+        self.assertTrue(boss.seal_waiting_for_purify)
         boss.seal_timer = 1.0
         boss.update(5.0, self.session.rng)
         self.assertEqual(len(boss.sealed_slots), 4)
-        self.assertEqual(boss.seal_timer, boss.seal_interval)
+        self.assertEqual(boss.seal_timer, boss.seal_refill_delay)
         self.assertTrue(boss.purify_one())
-        self.assertEqual(boss.seal_timer, boss.seal_interval)
+        self.assertEqual(boss.seal_timer, boss.seal_refill_delay)
+        self.assertFalse(boss.seal_waiting_for_purify)
+
+    def test_piton_refills_after_purify_delay_only(self) -> None:
+        boss = self.session.start_boss_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.spawn_elapsed = boss.spawn_duration
+        for _ in range(8):
+            boss.apply_random_seal(self.session.rng)
+        self.assertEqual(len(boss.sealed_slots), 4)
+
+        self.assertTrue(boss.purify_one())
+        self.assertEqual(len(boss.sealed_slots), 3)
+        boss.update(7.99, self.session.rng)
+        self.assertEqual(len(boss.sealed_slots), 3)
+        boss.update(0.02, self.session.rng)
+        self.assertEqual(len(boss.sealed_slots), 4)
+
+    def test_piton_does_not_reseal_recently_purified_slot(self) -> None:
+        boss = self.session.start_boss_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.spawn_elapsed = boss.spawn_duration
+        boss.sealed_slots = {0, 1, 2, 3}
+
+        self.assertTrue(boss.purify_one())
+        self.assertIn(0, boss.recently_purified_slots)
+        boss.seal_timer = 0.0
+        boss.update(0.01, self.session.rng)
+
+        self.assertNotIn(0, boss.sealed_slots)
+        self.assertEqual(len(boss.sealed_slots), 4)
 
     def test_piton_seals_one_random_spell_every_twenty_seconds(self) -> None:
         boss = self.session.start_boss_battle(
@@ -965,6 +1415,7 @@ class GameSessionTests(unittest.TestCase):
 
     def test_creep_spawns_with_at_least_two_patterns(self) -> None:
         found = None
+        self.session.stage = 2
         self.session.wave = 2
         for _ in range(300):
             self.session.spawn_queue.append(GHOST_SPECS[0])
