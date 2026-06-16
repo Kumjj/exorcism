@@ -12,9 +12,11 @@ from core import (
     SpellType,
     STAGE_TWO_PATTERN_POOL,
     WEAVER_LAYERED_PATTERN_POOL,
+    WEAVER_ORIGIN_PATTERN_POOL,
     WEAVER_PATTERN_POOL,
     WeaverBoss,
     mirrored_pattern,
+    pattern_conflicts_spell,
     pattern_attempt_matches,
 )
 
@@ -26,6 +28,12 @@ def has_diagonal_edge(pattern: tuple[int, ...]) -> bool:
         if abs(first_row - second_row) == 1 and abs(first_col - second_col) == 1:
             return True
     return False
+
+
+def is_straight_pattern(pattern: tuple[int, ...]) -> bool:
+    rows = {divmod(node, 3)[0] for node in pattern}
+    cols = {divmod(node, 3)[1] for node in pattern}
+    return len(rows) == 1 or len(cols) == 1
 
 
 class PatternInputTests(unittest.TestCase):
@@ -544,22 +552,72 @@ class GameSessionTests(unittest.TestCase):
 
         self.assertTrue(
             any(
-                pattern in mirrored
-                for row in boss.rows
-                for pattern in row
+                mirrored_pattern(pattern, axis) in mirrored
+                for row, axes in zip(boss.rows, boss.pattern_axis_rows)
+                for pattern, axis in zip(row, axes)
                 if pattern and isinstance(pattern[0], int)
+                and axis
             )
         )
-        for row in boss.rows:
+        for row, axes in zip(boss.rows, boss.pattern_axis_rows):
             simple_patterns = [
-                pattern
-                for pattern in row
+                mirrored_pattern(pattern, axis)
+                for pattern, axis in zip(row, axes)
                 if pattern and isinstance(pattern[0], int)
+                and axis
             ]
             for axis in ("x", "y", "origin"):
                 self.assertTrue(
                     any(pattern in mirrored_by_axis[axis] for pattern in simple_patterns)
                 )
+        for axes in boss.pattern_axis_rows:
+            self.assertEqual(sorted(axis for axis in axes if axis), ["origin", "x", "y"])
+        self.assertEqual(sorted(axis for axis in boss.pattern_axes if axis), ["origin", "x", "y"])
+
+    def test_weaver_origin_symmetry_uses_easy_straight_patterns(self) -> None:
+        self.assertTrue(
+            all(
+                is_straight_pattern(pattern)
+                for pattern in WEAVER_ORIGIN_PATTERN_POOL
+            )
+        )
+        boss = self.session.start_weaver_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+
+        for row, axes in zip(boss.rows, boss.pattern_axis_rows):
+            origin_patterns = [
+                pattern
+                for pattern, axis in zip(row, axes)
+                if axis == "origin"
+            ]
+            self.assertEqual(len(origin_patterns), 1)
+            self.assertTrue(is_straight_pattern(origin_patterns[0]))
+
+    def test_weaver_mirrored_slot_requires_unmirrored_input(self) -> None:
+        boss = self.session.start_weaver_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        mirrored_index = next(
+            index for index, axis in enumerate(boss.pattern_axes) if axis
+        )
+        pattern = boss.patterns[mirrored_index]
+        axis = boss.pattern_axes[mirrored_index]
+        displayed_pattern = mirrored_pattern(pattern, axis)
+        boss.patterns = [pattern]
+        boss.pattern_axes = [axis]
+        boss.sealed_slots.clear()
+        boss.spawn_elapsed = boss.spawn_duration
+
+        self.assertEqual(
+            self.session.judge_pattern(displayed_pattern),
+            PatternResult.MISSED,
+        )
+        self.assertEqual(self.session.judge_pattern(pattern), PatternResult.HIT)
+
+        self.assertEqual(len(boss.patterns), len(boss.pattern_axes))
 
     def test_weaver_single_patterns_use_readable_diagonal_paths(self) -> None:
         for pattern in WEAVER_PATTERN_POOL:
@@ -578,6 +636,37 @@ class GameSessionTests(unittest.TestCase):
                 for layered in WEAVER_LAYERED_PATTERN_POOL
             )
         )
+
+    def test_boss_patterns_do_not_overlap_spell_patterns(self) -> None:
+        piton = self.session.start_boss_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        self.assertTrue(
+            all(
+                not pattern_conflicts_spell(pattern)
+                for row in piton.rows
+                for pattern in row
+            )
+        )
+
+        for seed in range(12):
+            session = GameSession(rng=random.Random(seed))
+            weaver = session.start_weaver_battle(
+                ((800.0, 300.0),),
+                (400.0, 300.0),
+            )
+            for row in weaver.rows:
+                for pattern in row:
+                    if pattern and isinstance(pattern[0], tuple):
+                        self.assertTrue(
+                            all(
+                                not pattern_conflicts_spell(layer)
+                                for layer in pattern
+                            )
+                        )
+                    else:
+                        self.assertFalse(pattern_conflicts_spell(pattern))
 
     def test_weaver_timed_snarl_burst_spawns_three_snarl_ghosts(self) -> None:
         boss = self.session.start_weaver_battle(

@@ -1744,10 +1744,10 @@ class ExorcismGame:
             for ghost in spawned:
                 self._play_ghost_spawn_sound(ghost)
             if spawned:
-                self.boss_support_timer = 1.2
+                self.boss_support_timer = 2.0
             return
         if isinstance(boss, WeaverBoss):
-            support_limit = 5
+            support_limit = 4
         else:
             support_limits = (4, 5, 6)
             support_limit = support_limits[boss.row_index]
@@ -1760,7 +1760,7 @@ class ExorcismGame:
                 self._play_ghost_spawn_sound(ghost)
             intervals = (3.8, 2.7, 1.8)
             if isinstance(boss, WeaverBoss):
-                interval = 5.0
+                interval = 6.8
             else:
                 interval = (2.4, 1.9, 1.45)[boss.row_index]
             self.boss_support_timer = (
@@ -2786,6 +2786,14 @@ class ExorcismGame:
             )
             color = (120, 84, 145) if index in boss.sealed_slots else PATTERN_COLOR
             pygame.draw.rect(layer, (*color, 145), frame, 2, border_radius=5)
+            axis = (
+                boss.pattern_axes[index]
+                if isinstance(boss, WeaverBoss)
+                and index < len(boss.pattern_axes)
+                else ""
+            )
+            if axis:
+                self._draw_crease_axis(layer, frame, axis, color, opacity / 255)
             if pattern and isinstance(pattern[0], tuple):
                 for layer_index, sub_pattern in enumerate(pattern):
                     layer_color = CYAN if layer_index == 0 else GOLD
@@ -2798,9 +2806,14 @@ class ExorcismGame:
                         (10, 8, 22, opacity),
                     )
             else:
+                display_pattern = (
+                    mirrored_pattern(pattern, axis)
+                    if axis
+                    else pattern
+                )
                 self._draw_compact_pattern_skeleton(
                     layer,
-                    pattern,
+                    display_pattern,
                     pattern_center,
                     11,
                     (*color, opacity),
@@ -3154,7 +3167,9 @@ class ExorcismGame:
             display_pattern = self._display_pattern_for_ghost(
                 ghost, pattern, crease_axis
             )
-            wave_strength = 1.0 if ghost.kind is GhostKind.WAVY else 0.0
+            wave_strength = 0.0
+            if ghost.kind is GhostKind.WAVY:
+                wave_strength = 0.55 if self.session.stage >= 2 else 1.0
             nodes = [
                 (
                     pattern_center[0]

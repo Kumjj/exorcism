@@ -94,6 +94,14 @@ WEAVER_PATTERN_POOL: tuple[Pattern, ...] = (
     (0, 4, 7, 5, 2, 1),
     (2, 4, 3, 7, 6, 5),
 )
+WEAVER_ORIGIN_PATTERN_POOL: tuple[Pattern, ...] = (
+    (0, 1, 2),
+    (3, 4, 5),
+    (6, 7, 8),
+    (0, 3, 6),
+    (1, 4, 7),
+    (2, 5, 8),
+)
 WEAVER_LAYERED_PATTERN_POOL: tuple[tuple[Pattern, Pattern], ...] = (
     ((0, 1, 4, 7), (2, 5, 8)),
     ((0, 3, 4, 5), (2, 1, 4, 7)),
@@ -608,10 +616,12 @@ class PitonBoss:
     y: float
     target_x: float
     target_y: float
-    rows: list[list[Pattern]]
+    rows: list[list[PatternAttempt]]
     radius: int = 58
     row_index: int = 0
-    patterns: list[Pattern] = field(default_factory=list)
+    patterns: list[PatternAttempt] = field(default_factory=list)
+    pattern_axis_rows: list[list[str]] = field(default_factory=list)
+    pattern_axes: list[str] = field(default_factory=list)
     sealed_slots: set[int] = field(default_factory=set)
     seal_timer: float = 12.0
     seal_interval: float = 12.0
@@ -655,6 +665,9 @@ class PitonBoss:
 
     def __post_init__(self) -> None:
         self.patterns = list(self.rows[0])
+        if not self.pattern_axis_rows:
+            self.pattern_axis_rows = [[""] * len(row) for row in self.rows]
+        self.pattern_axes = list(self.pattern_axis_rows[0])
         self.hit_reaction_elapsed = self.hit_reaction_duration
         self.start_moving_immediately()
 
@@ -903,13 +916,15 @@ class PitonBoss:
             index
             for index, pattern in enumerate(self.patterns)
             if index not in self.sealed_slots
-            and pattern_attempt_matches(entered, pattern)
+            and self._matches_pattern_slot(entered, pattern, index)
         ]
         if not matching:
             return ""
         self.hit_reaction_elapsed = 0.0
         removed_index = matching[0]
         self.patterns.pop(removed_index)
+        if removed_index < len(self.pattern_axes):
+            self.pattern_axes.pop(removed_index)
         self.sealed_slots = {
             index - 1 if index > removed_index else index
             for index in self.sealed_slots
@@ -923,6 +938,7 @@ class PitonBoss:
             return "defeated"
         self.row_index += 1
         self.patterns = list(self.rows[self.row_index])
+        self.pattern_axes = list(self.pattern_axis_rows[self.row_index])
         self.sealed_slots.clear()
         self.recently_purified_slots.clear()
         self.seal_waiting_for_purify = False
@@ -930,6 +946,23 @@ class PitonBoss:
         self.add_row_transition_seal(rng)
         self.apply_random_spell_seal(rng)
         return "row"
+
+    def _matches_pattern_slot(
+        self,
+        entered: PatternAttempt,
+        pattern: PatternAttempt,
+        index: int,
+    ) -> bool:
+        axis = self.pattern_axes[index] if index < len(self.pattern_axes) else ""
+        if (
+            axis
+            and pattern
+            and not isinstance(pattern[0], tuple)
+            and entered
+            and not isinstance(entered[0], tuple)
+        ):
+            return pattern_attempt_matches(entered, pattern)
+        return pattern_attempt_matches(entered, pattern)
 
     def retreat_and_reposition(self, position: tuple[float, float]) -> None:
         self.pending_x, self.pending_y = position
@@ -1137,6 +1170,24 @@ class SpellManager:
         if spell.cooldown <= 0:
             return 1.0
         return 1.0 - min(1.0, remaining / spell.cooldown)
+
+
+def pattern_conflicts_spell(pattern: Pattern) -> bool:
+    return any(patterns_match(pattern, spell.pattern) for spell in SpellManager.SPELLS)
+
+
+def non_spell_patterns(patterns: Sequence[Pattern]) -> tuple[Pattern, ...]:
+    return tuple(pattern for pattern in patterns if not pattern_conflicts_spell(pattern))
+
+
+def non_spell_layered_patterns(
+    patterns: Sequence[tuple[Pattern, Pattern]],
+) -> tuple[tuple[Pattern, Pattern], ...]:
+    return tuple(
+        layered
+        for layered in patterns
+        if not any(pattern_conflicts_spell(layer) for layer in layered)
+    )
 
 
 GHOST_SPECS = (
@@ -1374,11 +1425,14 @@ class GameSession:
                 else self.rng.choices((1, 2), weights=(70, 30), k=1)[0]
             )
             remaining_patterns = []
+            complex_patterns = non_spell_patterns(COMPLEX_PATTERN_POOL)
             for _ in range(snarl_count):
                 if self.rng.random() < 0.42:
-                    remaining_patterns.append(self.rng.choice(LAYERED_PATTERN_POOL))
+                    remaining_patterns.append(
+                        self.rng.choice(non_spell_layered_patterns(LAYERED_PATTERN_POOL))
+                    )
                 else:
-                    remaining_patterns.append(self.rng.choice(COMPLEX_PATTERN_POOL))
+                    remaining_patterns.append(self.rng.choice(complex_patterns))
         forbidden_patterns: list[Pattern] = []
         if kind is GhostKind.FORBIDDEN:
             overlapping = [
@@ -1539,10 +1593,12 @@ class GameSession:
         )
         if self.stage == 2:
             if self.wave == 1:
-                return STAGE_TWO_PATTERN_POOL
+                return non_spell_patterns(STAGE_TWO_PATTERN_POOL)
             if self.wave == 2:
-                return STAGE_TWO_PATTERN_POOL + COMPLEX_PATTERN_POOL[-4:]
-            return STAGE_TWO_PATTERN_POOL + COMPLEX_PATTERN_POOL
+                return non_spell_patterns(
+                    STAGE_TWO_PATTERN_POOL + COMPLEX_PATTERN_POOL[-4:]
+                )
+            return non_spell_patterns(STAGE_TWO_PATTERN_POOL + COMPLEX_PATTERN_POOL)
         if self.wave == 1:
             return short_patterns
         if self.wave == 2:
@@ -1583,10 +1639,8 @@ class GameSession:
             50,
             (180, 145, 220),
         )
-        rows = [
-            self.rng.sample(COMPLEX_PATTERN_POOL, k=5)
-            for _ in range(3)
-        ]
+        boss_patterns = non_spell_patterns(COMPLEX_PATTERN_POOL)
+        rows = [self.rng.sample(boss_patterns, k=5) for _ in range(3)]
         position = self.rng.choice(tuple(spawn_positions))
         self.boss = PitonBoss(
             boss_spec,
@@ -1619,17 +1673,41 @@ class GameSession:
         )
         rows: list[list[PatternAttempt]] = []
         axes = ("x", "y", "origin")
+        weaver_patterns = non_spell_patterns(WEAVER_PATTERN_POOL)
+        weaver_origin_patterns = non_spell_patterns(WEAVER_ORIGIN_PATTERN_POOL)
+        weaver_layered_patterns = non_spell_layered_patterns(
+            WEAVER_LAYERED_PATTERN_POOL
+        )
+        pattern_axis_rows: list[list[str]] = []
         for _ in range(4):
-            row: list[PatternAttempt] = []
-            source_patterns = self.rng.sample(WEAVER_PATTERN_POOL, k=3)
-            row.extend(
-                mirrored_pattern(pattern, axis)
-                for pattern, axis in zip(source_patterns, axes)
+            row_entries: list[tuple[PatternAttempt, str]] = []
+            for axis in axes:
+                source_pool = (
+                    weaver_origin_patterns
+                    if axis == "origin"
+                    else weaver_patterns
+                )
+                axis_patterns = tuple(
+                    pattern
+                    for pattern in source_pool
+                    if not pattern_conflicts_spell(pattern)
+                    and not pattern_conflicts_spell(mirrored_pattern(pattern, axis))
+                )
+                row_entries.append(
+                    (self.rng.choice(axis_patterns), axis)
+                )
+            row_entries.extend(
+                (pattern, "") for pattern in self.rng.sample(weaver_patterns, k=1)
             )
-            row.extend(self.rng.sample(WEAVER_PATTERN_POOL, k=1))
-            row.extend(self.rng.sample(WEAVER_LAYERED_PATTERN_POOL, k=2))
-            self.rng.shuffle(row)
+            row_entries.extend(
+                (pattern, "")
+                for pattern in self.rng.sample(weaver_layered_patterns, k=2)
+            )
+            self.rng.shuffle(row_entries)
+            row = [pattern for pattern, _ in row_entries]
+            row_axes = [axis for _, axis in row_entries]
             rows.append(row)
+            pattern_axis_rows.append(row_axes)
         position = self.rng.choice(tuple(spawn_positions))
         self.boss = WeaverBoss(
             boss_spec,
@@ -1637,9 +1715,10 @@ class GameSession:
             position[1],
             player_position[0],
             player_position[1],
-            rows,  # type: ignore[arg-type]
+            rows,
             radius=64,
             movement_duration=3.55,
+            pattern_axis_rows=pattern_axis_rows,
         )
         self.boss_battle = True
         self.stage_cleared = False
