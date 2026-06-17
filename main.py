@@ -62,13 +62,13 @@ PATTERN_COLOR = (222, 231, 240)
 BGM_VOLUME_SCALE = 0.45
 BGM_TRACKS: dict[str, tuple[str, ...]] = {
     "title": ("title_bgm.mp3",),
-    "gameover": ("gameover_bgm.mp3",),
-    "stage1": ("stage1_bgm.mp3",),
-    "stage2": ("stage2_bgm.mp3",),
-    "stage3": ("stage3_bgm.mp3",),
-    "boss1": ("boss1_bgm.mp3",),
-    "boss2": ("boss2_bgm.mp3",),
-    "final_boss": ("final_boss_bgm.mp3",),
+    "gameover": ("Game_over_bgm.mp3",),
+    "stage1": ("Pition_bgm.mp3",),
+    "stage2": ("Weaver_bgm.mp3",),
+    "stage3": ("Veil of Lucien.mp3",),
+    "boss1": ("Pition_bgm.mp3",),
+    "boss2": ("Weaver_bgm.mp3",),
+    "final_boss": ("Veil of Lucien.mp3",),
 }
 
 
@@ -197,16 +197,12 @@ class ExorcismGame:
         pygame.display.set_caption("Exocism")
         self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
         self.clock = pygame.time.Clock()
-        self.font_small = pygame.font.Font(None, 24)
-        self.font = pygame.font.Font(None, 32)
-        self.font_large = pygame.font.Font(None, 54)
-        self.font_title = pygame.font.Font(None, 92)
-        dialogue_font_path = (
-            pygame.font.match_font("malgungothic")
-            or pygame.font.match_font("nanumgothic")
-            or pygame.font.match_font("notosanscjkkr")
-        )
-        self.dialogue_font = pygame.font.Font(dialogue_font_path, 30)
+        korean_font_path = self._korean_font_path()
+        self.font_small = pygame.font.Font(korean_font_path, 21)
+        self.font = pygame.font.Font(korean_font_path, 28)
+        self.font_large = pygame.font.Font(korean_font_path, 48)
+        self.font_title = pygame.font.Font(korean_font_path, 82)
+        self.dialogue_font = pygame.font.Font(korean_font_path, 28)
         self.state = "menu"
         self.running = True
         self.menu_background = self._load_cover_image("main.png")
@@ -264,7 +260,16 @@ class ExorcismGame:
             state: self._load_scaled_image(f"luciel_{state}.png", 198)
             for state in ("idle", "attacked", "defeated")
         }
+        luciel_image = self._load_scaled_image("Luciel.png", 214)
+        if luciel_image is None:
+            luciel_image = self._load_scaled_image("The_Vail(Luciel).png", 214)
+        if luciel_image is not None:
+            self.luciel_images = {
+                state: luciel_image
+                for state in ("idle", "attacked", "defeated")
+            }
         self.weaver_web_image = self._load_scaled_image("weaver_web.png", 220)
+        self.dark_magic_image = self._load_scaled_image("dark_magic.png", 250)
         self.health_image = self._load_scaled_image("peter_health.png", 68)
         self.health_lost_image = (
             self._grayscale_surface(self.health_image)
@@ -426,6 +431,24 @@ class ExorcismGame:
         self.ghost_boo_channels: dict[int, pygame.mixer.Channel] = {}
         self._apply_audio_settings()
         self._sync_bgm_to_state()
+
+    def _korean_font_path(self) -> str | None:
+        candidates = (
+            Path(__file__).with_name("NotoSansKR-VF.ttf"),
+            Path(__file__).with_name("malgun.ttf"),
+            Path("/mnt/c/Windows/Fonts/NotoSansKR-VF.ttf"),
+            Path("/mnt/c/Windows/Fonts/malgun.ttf"),
+            Path("/mnt/c/Windows/Fonts/gulim.ttc"),
+            Path("/mnt/c/Windows/Fonts/GOTHIC.TTF"),
+        )
+        for path in candidates:
+            if path.exists():
+                return str(path)
+        return (
+            pygame.font.match_font("malgungothic")
+            or pygame.font.match_font("nanumgothic")
+            or pygame.font.match_font("notosanscjkkr")
+        )
 
     def _load_sound(self, filename: str) -> pygame.mixer.Sound | None:
         sound_path = Path(__file__).with_name(filename)
@@ -1151,6 +1174,7 @@ class ExorcismGame:
             self.stage_three_video_channel.stop()
             self.stage_three_video_channel = None
         self.session.start_stage(3)
+        self.session.start_luciel_battle(SPAWN_POSITIONS, PLAYER_POSITION)
         self.pattern_input.clear()
         self.last_drag_position = None
         self.pending_shift_pattern = ()
@@ -1165,6 +1189,7 @@ class ExorcismGame:
         self.stage_clear_elapsed = 0.0
         self.grid_intro_elapsed = 0.0
         self.spawn_timer = self.grid_intro_duration + 0.25
+        self.boss_support_timer = 3.0
         self.message_timer = 0.0
         self.boss_epilogue_started = False
         self.seal_support_timer = 0.0
@@ -3083,6 +3108,7 @@ class ExorcismGame:
             self._draw_background()
 
     def _draw_world(self) -> None:
+        self._draw_luciel_dark_magic_under_player()
         if self.player_attack_timer > 0 and self.player_attack_image is not None:
             frame = self.player_attack_image
             rect = frame.get_rect(center=PLAYER_POSITION)
@@ -3111,6 +3137,37 @@ class ExorcismGame:
                 self._draw_piton(self.session.boss)
 
         self._draw_large_grid()
+
+    def _draw_luciel_dark_magic_under_player(self) -> None:
+        boss = self.session.boss
+        if (
+            not isinstance(boss, LucielBoss)
+            or not boss.arcane_charging
+            or boss.alpha <= 0
+        ):
+            return
+        progress = boss.arcane_charge_progress
+        eased = progress * progress * (3.0 - 2.0 * progress)
+        layer = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        if self.dark_magic_image is not None:
+            scale = 0.62 + eased * 0.44
+            image = pygame.transform.smoothscale(
+                self.dark_magic_image,
+                (
+                    max(1, round(self.dark_magic_image.get_width() * scale)),
+                    max(1, round(self.dark_magic_image.get_height() * scale)),
+                ),
+            )
+            image.set_alpha(round(boss.alpha * min(1.0, 0.22 + eased * 0.72)))
+            layer.blit(image, image.get_rect(center=PLAYER_POSITION))
+        else:
+            pygame.draw.circle(
+                layer,
+                (74, 34, 112, round(boss.alpha * (0.18 + eased * 0.52))),
+                PLAYER_POSITION,
+                round(80 + eased * 115),
+            )
+        self.screen.blit(layer, (0, 0))
 
     def _draw_piton(self, boss: PitonBoss) -> None:
         alpha = boss.alpha
@@ -3225,23 +3282,16 @@ class ExorcismGame:
     def _draw_luciel_arcane_charge(self, boss: LucielBoss, alpha: int) -> None:
         progress = boss.arcane_charge_progress
         layer = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-        pulse_alpha = round(alpha * (0.24 + progress * 0.42))
-        radius = round(82 + progress * 118)
-        pygame.draw.circle(layer, (190, 220, 255, pulse_alpha), PLAYER_POSITION, radius, 5)
-        pygame.draw.circle(
-            layer,
-            (255, 245, 210, round(alpha * 0.55)),
-            PLAYER_POSITION,
-            round(18 + progress * 16),
-            3,
-        )
         timer_text = self.font_large.render(
             f"{math.ceil(boss.arcane_charge_remaining)}",
             True,
             (255, 238, 185),
         )
         timer_text.set_alpha(alpha)
-        layer.blit(timer_text, timer_text.get_rect(center=(PLAYER_POSITION[0], PLAYER_POSITION[1] - 95)))
+        layer.blit(
+            timer_text,
+            timer_text.get_rect(center=(PLAYER_POSITION[0], PLAYER_POSITION[1] - 95)),
+        )
         self._draw_compact_pattern_skeleton(
             layer,
             boss.arcane_pattern,
@@ -4012,7 +4062,7 @@ class ExorcismGame:
             tab.get_rect(),
             border_radius=10,
         )
-        label = self.font_small.render("SPELLS", True, WHITE)
+        label = self.font_small.render("주문", True, WHITE)
         label = pygame.transform.rotate(label, 90)
         tab.blit(label, label.get_rect(center=tab.get_rect().center))
         self.screen.blit(tab, self.spell_tab_rect)
@@ -4059,7 +4109,7 @@ class ExorcismGame:
             )
             if spell_is_sealed:
                 sealed = self.font_small.render(
-                    f"SEALED {spell_seal_remaining:.1f}s",
+                    f"봉인 {spell_seal_remaining:.1f}s",
                     True,
                     RED,
                 )
