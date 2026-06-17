@@ -921,7 +921,12 @@ class PitonBoss:
         if not matching:
             return ""
         self.hit_reaction_elapsed = 0.0
-        removed_index = matching[0]
+        return self.remove_pattern_slot(matching[0], rng)
+
+    def remove_pattern_slot(self, removed_index: int, rng: random.Random) -> str:
+        if removed_index < 0 or removed_index >= len(self.patterns):
+            return ""
+        self.hit_reaction_elapsed = 0.0
         self.patterns.pop(removed_index)
         if removed_index < len(self.pattern_axes):
             self.pattern_axes.pop(removed_index)
@@ -946,6 +951,17 @@ class PitonBoss:
         self.add_row_transition_seal(rng)
         self.apply_random_spell_seal(rng)
         return "row"
+
+    def purify_front_pattern(
+        self,
+        rng: random.Random,
+        excluded_slots: Optional[set[int]] = None,
+    ) -> str:
+        excluded_slots = excluded_slots or set()
+        for index in range(len(self.patterns)):
+            if index not in self.sealed_slots and index not in excluded_slots:
+                return self.remove_pattern_slot(index, rng)
+        return ""
 
     def _matches_pattern_slot(
         self,
@@ -1070,6 +1086,7 @@ class PatternInput:
 class SpellManager:
     MAX_POWER = 150
     HEAL_AMOUNT = 2
+    REJUVENATION_DURATION = 10.0
     REPEL_DISTANCE = 190.0
     REPEL_RADIUS = 330.0
     NULLIFY_RADIUS = 285.0
@@ -1077,15 +1094,15 @@ class SpellManager:
     SPELLS = (
         SpellDefinition(
             SpellType.HEAL,
-            "HEAL",
+            "REJUVENATION",
             (6, 4, 2, 1, 0, 5, 8),
             40,
-            "+2 HP",
+            "+2 HP / cooldown x2",
             7.0,
         ),
         SpellDefinition(
             SpellType.REPEL,
-            "REPEL",
+            "WARDING",
             (0, 4, 8, 5, 2),
             35,
             "Push and slow 1s",
@@ -1093,7 +1110,7 @@ class SpellManager:
         ),
         SpellDefinition(
             SpellType.NULLIFY,
-            "SANCTIFY",
+            "PURIFICATION",
             (0, 1, 4, 7, 8),
             45,
             "Clear all gimmicks",
@@ -1101,7 +1118,7 @@ class SpellManager:
         ),
         SpellDefinition(
             SpellType.TRUTH,
-            "TRUTH",
+            "REVELATION",
             (2, 1, 4, 3, 6),
             45,
             "Reveal creeps / clear traps",
@@ -1117,6 +1134,7 @@ class SpellManager:
             spell.spell_type: 0.0 for spell in self.SPELLS
         }
         self.cooldown_drags: dict[SpellType, float] = {}
+        self.cooldown_boost_remaining = 0.0
 
     def gain(self, amount: int) -> None:
         self.holy_power = min(self.MAX_POWER, self.holy_power + amount)
@@ -1145,9 +1163,20 @@ class SpellManager:
         self.cooldowns[spell.spell_type] = spell.cooldown
 
     def update(self, seconds: float) -> None:
+        self.cooldown_boost_remaining = max(
+            0.0,
+            self.cooldown_boost_remaining - seconds,
+        )
         for spell_type, remaining in list(self.cooldowns.items()):
             drag_remaining = self.cooldown_drags.get(spell_type, 0.0)
-            rate = 0.5 if drag_remaining > 0 else 1.0
+            rate = (
+                2.0
+                if self.cooldown_boost_remaining > 0
+                and spell_type is not SpellType.HEAL
+                else 1.0
+            )
+            if drag_remaining > 0:
+                rate *= 0.5
             self.cooldowns[spell_type] = max(0.0, remaining - seconds * rate)
             if drag_remaining > 0:
                 drag_remaining = max(0.0, drag_remaining - seconds)
@@ -1164,6 +1193,12 @@ class SpellManager:
 
     def clear_cooldown_drags(self) -> None:
         self.cooldown_drags.clear()
+
+    def activate_cooldown_boost(self) -> None:
+        self.cooldown_boost_remaining = max(
+            self.cooldown_boost_remaining,
+            self.REJUVENATION_DURATION,
+        )
 
     def cooldown_progress(self, spell: SpellDefinition) -> float:
         remaining = self.cooldowns.get(spell.spell_type, 0.0)
@@ -1204,6 +1239,7 @@ class GameSession:
     MAX_WAVES = 3
     STAGE_ONE_SEAL_LIMITS = {1: 0, 2: 0, 3: 1}
     STAGE_TWO_SEAL_LIMITS = {1: 0, 2: 1, 3: 1}
+    STAGE_THREE_SEAL_LIMITS = {1: 1, 2: 2, 3: 2}
     STAGE_ONE_WAVES = {
         1: (
             GhostKind.START_LOCKED,
@@ -1264,6 +1300,41 @@ class GameSession:
             GhostKind.SNARL,
         ),
     }
+    STAGE_THREE_WAVES = {
+        1: (
+            GhostKind.SLOWPOKE,
+            GhostKind.BLINKING,
+            GhostKind.CREASE,
+            GhostKind.WAVY,
+            GhostKind.PARTIAL,
+            GhostKind.CREEP,
+            GhostKind.FORBIDDEN,
+            GhostKind.START_LOCKED,
+        ),
+        2: (
+            GhostKind.SNARL,
+            GhostKind.CREASE,
+            GhostKind.PARTIAL,
+            GhostKind.CREEP,
+            GhostKind.WAVY,
+            GhostKind.FORBIDDEN,
+            GhostKind.START_LOCKED,
+            GhostKind.SNARL,
+            GhostKind.BLINKING,
+        ),
+        3: (
+            GhostKind.CREASE,
+            GhostKind.SNARL,
+            GhostKind.CREEP,
+            GhostKind.PARTIAL,
+            GhostKind.FORBIDDEN,
+            GhostKind.WAVY,
+            GhostKind.START_LOCKED,
+            GhostKind.CREASE,
+            GhostKind.SLOWPOKE,
+            GhostKind.SNARL,
+        ),
+    }
 
     rng: random.Random = field(default_factory=random.Random)
     max_health: int = 5
@@ -1311,7 +1382,7 @@ class GameSession:
         self.fill_wave()
 
     def start_stage(self, stage: int) -> None:
-        if stage not in (1, 2):
+        if stage not in (1, 2, 3):
             raise ValueError(f"Unsupported stage: {stage}")
         self.stage = stage
         self.wave = 1
@@ -1328,11 +1399,11 @@ class GameSession:
         self.fill_wave()
 
     def fill_wave(self) -> None:
-        waves = (
-            self.STAGE_ONE_WAVES
-            if self.stage == 1
-            else self.STAGE_TWO_WAVES
-        )
+        waves = {
+            1: self.STAGE_ONE_WAVES,
+            2: self.STAGE_TWO_WAVES,
+            3: self.STAGE_THREE_WAVES,
+        }[self.stage]
         kinds = waves.get(self.wave, ())
         specs = [self.rng.choice(GHOST_SPECS) for _ in kinds]
         self.spawn_queue.extend(specs)
@@ -1468,8 +1539,10 @@ class GameSession:
             crease_axes=crease_axes,
         )
         seal_limit = (
-            self.STAGE_TWO_SEAL_LIMITS.get(self.wave, 1)
-            if self.stage >= 2
+            self.STAGE_THREE_SEAL_LIMITS.get(self.wave, 2)
+            if self.stage >= 3
+            else self.STAGE_TWO_SEAL_LIMITS.get(self.wave, 1)
+            if self.stage == 2
             else self.STAGE_ONE_SEAL_LIMITS.get(self.wave, 0)
         )
         seal_eligible = self.stage >= 2 or (
@@ -1558,7 +1631,7 @@ class GameSession:
         )
 
     def _planned_pattern_count(self, kind: GhostKind) -> int:
-        if self.stage == 2:
+        if self.stage >= 2:
             if self.wave == 1:
                 return 2
             if self.wave == 2:
@@ -1591,7 +1664,7 @@ class GameSession:
         medium_patterns = tuple(
             pattern for pattern in PATTERN_POOL if len(pattern) >= 4
         )
-        if self.stage == 2:
+        if self.stage >= 2:
             if self.wave == 1:
                 return non_spell_patterns(STAGE_TWO_PATTERN_POOL)
             if self.wave == 2:
@@ -2040,12 +2113,11 @@ class GameSession:
     def _cast_spell(self, spell: SpellDefinition) -> None:
         active_ghosts = [ghost for ghost in self.ghosts if ghost.is_interactive]
         if spell.spell_type is SpellType.HEAL:
-            if self.health >= self.max_health:
-                return
             self.spells.spend(spell)
             self.health = min(
                 self.max_health, self.health + self.spells.HEAL_AMOUNT
             )
+            self.spells.activate_cooldown_boost()
         elif spell.spell_type is SpellType.REPEL:
             self.spells.spend(spell)
             for ghost in active_ghosts:
@@ -2076,6 +2148,7 @@ class GameSession:
             self.spells.spend(spell)
             self.spells.clear_cooldown_drags()
             if self.boss is not None and self.boss_battle:
+                originally_sealed_slots = set(self.boss.sealed_slots)
                 if isinstance(self.boss, WeaverBoss):
                     self.boss.recently_purified_slots.update(
                         self.boss.sealed_slots
@@ -2086,6 +2159,26 @@ class GameSession:
                     self.boss.clear_web_effects()
                 else:
                     self.boss.purify_one()
+                boss_result = self.boss.purify_front_pattern(
+                    self.rng,
+                    excluded_slots=originally_sealed_slots,
+                )
+                if boss_result:
+                    self.last_match_count += 1
+                    self.boss_last_event = boss_result
+                    if boss_result == "row":
+                        self.score += 700
+                    elif boss_result == "defeated":
+                        self.score += self.boss.spec.score
+                        self.spells.gain(self.boss.spec.holy_power)
+                        self.defeat_all_ghosts()
+                        self.defeated_events.append(
+                            (
+                                self.boss.x,
+                                self.boss.y,
+                                self.boss.spec.holy_power,
+                            )
+                        )
             for ghost in active_ghosts:
                 ghost.nullify_gimmick()
         elif spell.spell_type is SpellType.TRUTH:

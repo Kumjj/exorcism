@@ -256,7 +256,7 @@ class GameSessionTests(unittest.TestCase):
         self.assertEqual(self.session.health, 4)
         self.assertEqual(self.session.spells.holy_power, 0)
 
-    def test_heal_does_not_consume_power_at_full_health(self) -> None:
+    def test_rejuvenation_consumes_power_at_full_health_for_cooldown_boost(self) -> None:
         self.session.spells.holy_power = SpellManager.HEAL_COST
 
         result = self.session.judge_pattern(SpellManager.HEAL_PATTERN)
@@ -265,8 +265,22 @@ class GameSessionTests(unittest.TestCase):
         self.assertTrue(self.session.last_spell_cast)
         self.assertEqual(self.session.health, self.session.max_health)
         self.assertEqual(
-            self.session.spells.holy_power, SpellManager.HEAL_COST
+            self.session.spells.holy_power, 0
         )
+        self.assertEqual(
+            self.session.spells.cooldown_boost_remaining,
+            SpellManager.REJUVENATION_DURATION,
+        )
+
+    def test_rejuvenation_doubles_other_spell_cooldown_recovery(self) -> None:
+        self.session.spells.cooldowns[SpellType.HEAL] = 7.0
+        self.session.spells.cooldowns[SpellType.REPEL] = 6.0
+        self.session.spells.cooldown_boost_remaining = 10.0
+
+        self.session.spells.update(1.0)
+
+        self.assertEqual(self.session.spells.cooldowns[SpellType.HEAL], 6.0)
+        self.assertEqual(self.session.spells.cooldowns[SpellType.REPEL], 4.0)
 
     def test_holy_power_capacity_is_one_hundred_fifty(self) -> None:
         self.session.spells.gain(999)
@@ -400,6 +414,20 @@ class GameSessionTests(unittest.TestCase):
         self.assertEqual(
             tuple(self.session.kind_queue),
             GameSession.STAGE_TWO_WAVES[1],
+        )
+
+    def test_start_stage_three_uses_mixed_placeholder_waves(self) -> None:
+        self.session.start_stage(3)
+
+        self.assertEqual(self.session.stage, 3)
+        self.assertEqual(self.session.wave, 1)
+        self.assertEqual(
+            tuple(self.session.kind_queue),
+            GameSession.STAGE_THREE_WAVES[1],
+        )
+        self.assertGreaterEqual(
+            len(set(self.session.kind_queue)),
+            6,
         )
 
     def test_stage_two_starts_with_longer_two_pattern_ghosts(self) -> None:
@@ -779,6 +807,55 @@ class GameSessionTests(unittest.TestCase):
         self.assertEqual(boss.sealed_slots, set())
         self.assertEqual(boss.active_web_lanes, {})
         self.assertEqual(boss.recently_purified_slots, {0, 1, 3})
+
+    def test_sanctify_permanently_removes_front_unsealed_boss_pattern(self) -> None:
+        boss = self.session.start_boss_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.spawn_elapsed = boss.spawn_duration
+        first = boss.patterns[0]
+        second = boss.patterns[1]
+        spell = next(
+            spell
+            for spell in SpellManager.SPELLS
+            if spell.spell_type is SpellType.NULLIFY
+        )
+        self.session.spells.holy_power = spell.cost
+
+        self.assertEqual(
+            self.session.judge_pattern(spell.pattern),
+            PatternResult.SPELL,
+        )
+
+        self.assertNotIn(first, boss.patterns)
+        self.assertEqual(boss.patterns[0], second)
+
+    def test_sanctify_skips_sealed_front_boss_pattern(self) -> None:
+        boss = self.session.start_boss_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.spawn_elapsed = boss.spawn_duration
+        first = boss.patterns[0]
+        second = boss.patterns[1]
+        third = boss.patterns[2]
+        boss.sealed_slots = {0}
+        spell = next(
+            spell
+            for spell in SpellManager.SPELLS
+            if spell.spell_type is SpellType.NULLIFY
+        )
+        self.session.spells.holy_power = spell.cost
+
+        self.assertEqual(
+            self.session.judge_pattern(spell.pattern),
+            PatternResult.SPELL,
+        )
+
+        self.assertEqual(boss.patterns[0], first)
+        self.assertEqual(boss.patterns[1], third)
+        self.assertNotIn(second, boss.patterns)
 
     def test_weaver_does_not_reseal_recently_purified_slots(self) -> None:
         boss = self.session.start_weaver_battle(
