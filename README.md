@@ -16,18 +16,23 @@ python main.py
 ```
 
 On the first launch, `exorcism_sceen1.mp4` plays once and holds its final
-frame. Its embedded audio plays with the video. The separate tutorial music
-starts at 8 seconds and loops from that point until the player draws the
-displayed horizontal pattern. The target pattern and input grid fade in and
-spread from the center after the video finishes.
+frame. Its embedded audio plays with the video. The target pattern and input
+grid fade in and spread from the center after the video finishes.
 
 After the pattern succeeds, `exorcism_sceen2.mp4` plays with its embedded
-audio and `intro_atmosphere.mp3`. The final frame remains on screen while three
-dialogue lines fade in. Click or press `Enter`/`Space` to advance. After the
-last line, the scene fades to black and then fades into the game.
+audio. The final frame remains on screen while three dialogue lines fade in.
+Click or press `Enter`/`Space` to advance. After the last line, the scene fades
+to black and then fades into the game.
 The in-game scene uses `stage1.png` as its background.
-The atmosphere track starts from 8 seconds, loops that remaining section, and
-continues across both videos, dialogue, and gameplay without restarting.
+Background music is selected by game state. Add these optional files next to
+`main.py`: `title_bgm.mp3`, `stage1_bgm.mp3`, `stage2_bgm.mp3`,
+`stage3_bgm.mp3`, `boss1_bgm.mp3`, `boss2_bgm.mp3`, `final_boss_bgm.mp3`, and
+`gameover_bgm.mp3`. `title_bgm.mp3` is used on the title/settings screens, and
+`gameover_bgm.mp3` is used on the game-over screen. The three stage tracks are
+used during regular Stage 1, Stage 2, and Stage 3 play. `boss1_bgm.mp3` is for
+Piton, `boss2_bgm.mp3` is for Weaver, and `final_boss_bgm.mp3` is for Stage 3+
+boss battles. Story/dialogue/video scenes do not play separate BGM; they rely
+on the video's embedded audio.
 Dialogue characters appear one by one with a short upward motion. The panel
 stays in place while lines switch with a quick text fade.
 Peter's speech sound overlaps once for every two revealed dialogue characters.

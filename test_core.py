@@ -6,6 +6,7 @@ from core import (
     GameSession,
     Ghost,
     GhostKind,
+    LucielBoss,
     PatternInput,
     PatternResult,
     SpellManager,
@@ -665,6 +666,83 @@ class GameSessionTests(unittest.TestCase):
             )
         )
 
+    def test_luciel_has_arcane_mirrored_and_layered_patterns(self) -> None:
+        boss = self.session.start_luciel_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+
+        self.assertIsInstance(boss, LucielBoss)
+        self.assertEqual(len(boss.rows), 4)
+        self.assertTrue(all(len(row) == 6 for row in boss.rows))
+        self.assertTrue(
+            any(isinstance(pattern[0], tuple) for row in boss.rows for pattern in row)
+        )
+        self.assertTrue(any(axis for axes in boss.pattern_axis_rows for axis in axes))
+        self.assertGreaterEqual(len(boss.arcane_pattern), 5)
+
+    def test_luciel_arcane_charge_deals_two_damage_if_not_countered(self) -> None:
+        boss = self.session.start_luciel_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.spawn_elapsed = boss.spawn_duration
+        boss.arcane_timer = 0.0
+
+        self.session.update_boss(0.1, ((800.0, 300.0),), (400.0, 300.0), 44)
+        self.assertTrue(boss.arcane_charging)
+        self.session.update_boss(
+            boss.arcane_charge_duration,
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+            44,
+        )
+
+        self.assertEqual(self.session.health, self.session.max_health - 2)
+
+    def test_luciel_arcane_charge_is_countered_by_required_pattern(self) -> None:
+        boss = self.session.start_luciel_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.spawn_elapsed = boss.spawn_duration
+        boss.arcane_charge_remaining = boss.arcane_charge_duration
+
+        result = self.session.judge_pattern(boss.arcane_pattern)
+        self.session.update_boss(
+            boss.arcane_charge_duration,
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+            44,
+        )
+
+        self.assertEqual(result, PatternResult.HIT)
+        self.assertFalse(boss.arcane_charging)
+        self.assertEqual(self.session.health, self.session.max_health)
+
+    def test_luciel_hides_after_repeated_pattern_hits(self) -> None:
+        boss = self.session.start_luciel_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.spawn_elapsed = boss.spawn_duration
+        boss.hide_after_hits = 1
+        boss.hits_until_hide = 1
+        boss.sealed_slots.clear()
+        plain_index = next(
+            index
+            for index, pattern in enumerate(boss.patterns)
+            if pattern and isinstance(pattern[0], int)
+        )
+        boss.patterns = [boss.patterns[plain_index]]
+        boss.pattern_axes = [boss.pattern_axes[plain_index]]
+
+        result = self.session.judge_pattern(boss.patterns[0])
+
+        self.assertEqual(result, PatternResult.HIT)
+        self.assertGreater(boss.hidden_remaining, 0.0)
+        self.assertFalse(boss.is_interactive)
+
     def test_boss_patterns_do_not_overlap_spell_patterns(self) -> None:
         piton = self.session.start_boss_battle(
             ((800.0, 300.0),),
@@ -685,6 +763,22 @@ class GameSessionTests(unittest.TestCase):
                 (400.0, 300.0),
             )
             for row in weaver.rows:
+                for pattern in row:
+                    if pattern and isinstance(pattern[0], tuple):
+                        self.assertTrue(
+                            all(
+                                not pattern_conflicts_spell(layer)
+                                for layer in pattern
+                            )
+                        )
+                    else:
+                        self.assertFalse(pattern_conflicts_spell(pattern))
+            luciel = session.start_luciel_battle(
+                ((800.0, 300.0),),
+                (400.0, 300.0),
+            )
+            self.assertFalse(pattern_conflicts_spell(luciel.arcane_pattern))
+            for row in luciel.rows:
                 for pattern in row:
                     if pattern and isinstance(pattern[0], tuple):
                         self.assertTrue(

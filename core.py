@@ -1058,6 +1058,88 @@ class WeaverBoss(PitonBoss):
         self.active_web_lanes.clear()
         self.pending_web_spell = None
 
+
+@dataclass
+class LucielBoss(PitonBoss):
+    seal_timer: float = 16.0
+    seal_interval: float = 16.0
+    spell_seal_timer: float = 24.0
+    spell_seal_interval: float = 24.0
+    hidden_duration: float = 2.4
+    arcane_timer: float = 3.2
+    arcane_interval: float = 8.5
+    arcane_charge_duration: float = 5.0
+    arcane_charge_remaining: float = 0.0
+    arcane_pattern: Pattern = (0, 4, 8, 5, 2)
+    arcane_pending_damage: int = 0
+    hide_after_hits: int = 2
+    hits_until_hide: int = 2
+
+    @property
+    def arcane_charging(self) -> bool:
+        return self.arcane_charge_remaining > 0
+
+    @property
+    def arcane_charge_progress(self) -> float:
+        if self.arcane_charge_duration <= 0:
+            return 1.0
+        elapsed = self.arcane_charge_duration - self.arcane_charge_remaining
+        return max(0.0, min(1.0, elapsed / self.arcane_charge_duration))
+
+    def update(self, seconds: float, rng: random.Random) -> None:
+        super().update(seconds, rng)
+        if self.defeated or self.hidden_remaining > 0:
+            return
+        if self.arcane_charging:
+            self.arcane_charge_remaining = max(
+                0.0,
+                self.arcane_charge_remaining - seconds,
+            )
+            if self.arcane_charge_remaining <= 0:
+                self.arcane_pending_damage += 2
+                self.arcane_timer = self.arcane_interval
+            return
+        self.arcane_timer -= seconds
+        if self.arcane_timer <= 0:
+            self.arcane_charge_remaining = self.arcane_charge_duration
+
+    def hit_pattern(self, entered: PatternAttempt, rng: random.Random) -> str:
+        if (
+            self.arcane_charging
+            and entered
+            and not isinstance(entered[0], tuple)
+            and pattern_attempt_matches(entered, self.arcane_pattern)
+        ):
+            self.arcane_charge_remaining = 0.0
+            self.arcane_timer = self.arcane_interval
+            self.hit_reaction_elapsed = 0.0
+            return "arcane_countered"
+        result = super().hit_pattern(entered, rng)
+        if result in ("hit", "row"):
+            self.hits_until_hide -= 1
+            if self.hits_until_hide <= 0 and self.patterns:
+                self.hits_until_hide = self.hide_after_hits
+                self.retreat_and_reposition(self._hidden_reposition(rng))
+                return "hide"
+        return result
+
+    def consume_arcane_damage(self) -> int:
+        damage = self.arcane_pending_damage
+        self.arcane_pending_damage = 0
+        return damage
+
+    def _hidden_reposition(self, rng: random.Random) -> tuple[float, float]:
+        dx = self.x - self.target_x
+        dy = self.y - self.target_y
+        distance = math.hypot(dx, dy) or 1.0
+        base_angle = math.atan2(dy, dx)
+        angle = base_angle + rng.choice((-1.0, 1.0)) * rng.uniform(0.9, 1.8)
+        radius = max(distance + 90.0, self.radius + 275.0)
+        return (
+            self.target_x + math.cos(angle) * radius,
+            self.target_y + math.sin(angle) * radius,
+        )
+
 class PatternInput:
     def __init__(self) -> None:
         self.nodes: list[int] = []
@@ -1798,6 +1880,73 @@ class GameSession:
         self.boss_last_event = ""
         return self.boss
 
+    def start_luciel_battle(
+        self,
+        spawn_positions: Sequence[tuple[float, float]],
+        player_position: tuple[float, float],
+    ) -> LucielBoss:
+        self.spawn_queue.clear()
+        self.kind_queue.clear()
+        self.ghosts.clear()
+        boss_spec = GhostSpec(
+            "Luciel",
+            COMPLEX_PATTERN_POOL[-1],
+            min(spec.speed for spec in GHOST_SPECS) / 2.15,
+            9000,
+            100,
+            (225, 210, 255),
+        )
+        axes = ("x", "y", "origin")
+        luciel_patterns = non_spell_patterns(
+            STAGE_TWO_PATTERN_POOL + WEAVER_PATTERN_POOL + COMPLEX_PATTERN_POOL
+        )
+        layered_patterns = non_spell_layered_patterns(
+            WEAVER_LAYERED_PATTERN_POOL + LAYERED_PATTERN_POOL
+        )
+        rows: list[list[PatternAttempt]] = []
+        pattern_axis_rows: list[list[str]] = []
+        for _ in range(4):
+            row_entries: list[tuple[PatternAttempt, str]] = []
+            for axis in axes:
+                axis_patterns = tuple(
+                    pattern
+                    for pattern in luciel_patterns
+                    if not pattern_conflicts_spell(pattern)
+                    and not pattern_conflicts_spell(mirrored_pattern(pattern, axis))
+                )
+                row_entries.append((self.rng.choice(axis_patterns), axis))
+            row_entries.extend(
+                (pattern, "") for pattern in self.rng.sample(layered_patterns, k=2)
+            )
+            row_entries.extend(
+                (pattern, "") for pattern in self.rng.sample(luciel_patterns, k=1)
+            )
+            self.rng.shuffle(row_entries)
+            rows.append([pattern for pattern, _ in row_entries])
+            pattern_axis_rows.append([axis for _, axis in row_entries])
+        arcane_candidates = tuple(
+            pattern
+            for pattern in luciel_patterns
+            if len(pattern) >= 5 and not pattern_conflicts_spell(pattern)
+        )
+        position = self.rng.choice(tuple(spawn_positions))
+        self.boss = LucielBoss(
+            boss_spec,
+            position[0],
+            position[1],
+            player_position[0],
+            player_position[1],
+            rows,
+            radius=66,
+            movement_duration=3.85,
+            pattern_axis_rows=pattern_axis_rows,
+            arcane_pattern=self.rng.choice(arcane_candidates),
+        )
+        self.boss_battle = True
+        self.stage_cleared = False
+        self.boss_last_event = ""
+        return self.boss
+
     def spawn_boss_support(
         self,
         spawn_positions: Sequence[tuple[float, float]],
@@ -1807,15 +1956,23 @@ class GameSession:
             return None
         if not self.spawn_queue:
             self.spawn_queue.append(self.rng.choice(GHOST_SPECS[:3]))
-            support_kinds = (
-                (GhostKind.SLOWPOKE,)
-                if self.boss.row_number == 1
-                else (
-                    GhostKind.SLOWPOKE,
-                    GhostKind.START_LOCKED,
+            if isinstance(self.boss, LucielBoss):
+                support_kinds = (
+                    GhostKind.CREEP,
+                    GhostKind.CREASE,
+                    GhostKind.SNARL,
                     GhostKind.FORBIDDEN,
                 )
-            )
+            else:
+                support_kinds = (
+                    (GhostKind.SLOWPOKE,)
+                    if self.boss.row_number == 1
+                    else (
+                        GhostKind.SLOWPOKE,
+                        GhostKind.START_LOCKED,
+                        GhostKind.FORBIDDEN,
+                    )
+                )
             self.kind_queue.append(self.rng.choice(support_kinds))
         return self.spawn_next(spawn_positions, player_position)
 
@@ -1876,6 +2033,12 @@ class GameSession:
                         ghost.slow_remaining,
                         2.0 if ghost.slow_remaining > 0 else 1.0,
                     )
+        if isinstance(self.boss, LucielBoss):
+            arcane_damage = self.boss.consume_arcane_damage()
+            if arcane_damage:
+                self.damage(arcane_damage)
+                self.last_message = "Luciel's spell struck you!"
+                return arcane_damage
         if (
             self.boss.is_interactive
             and self.boss.distance_to(player_position)
