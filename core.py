@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum, auto
 import math
 import random
@@ -109,6 +109,37 @@ WEAVER_LAYERED_PATTERN_POOL: tuple[tuple[Pattern, Pattern], ...] = (
     ((0, 4, 8), (2, 1, 4, 3, 6)),
     ((6, 7, 4, 1), (0, 3, 4, 5, 8)),
     ((2, 5, 4, 7, 6), (0, 1, 4, 3)),
+)
+LUCIEL_ARCANE_EASY_PATTERNS: tuple[Pattern, ...] = (
+    (0, 1, 2),
+    (0, 3, 6),
+    (2, 5, 8),
+    (6, 7, 8),
+    (0, 4, 8),
+    (2, 4, 6),
+)
+LUCIEL_ARCANE_MEDIUM_PATTERNS: tuple[Pattern, ...] = (
+    (0, 1, 4, 7),
+    (2, 1, 4, 7),
+    (0, 3, 4, 5),
+    (6, 3, 4, 2),
+    (0, 4, 2, 5, 8),
+    (2, 4, 0, 3, 6),
+)
+LUCIEL_ARCANE_HARD_PATTERNS: tuple[Pattern, ...] = (
+    (0, 4, 2, 5, 7, 6),
+    (2, 4, 6, 3, 1, 0),
+    (6, 4, 8, 5, 1, 2),
+    (8, 4, 0, 3, 7, 6),
+    (0, 4, 1, 5, 8, 7),
+    (2, 4, 7, 3, 6, 1),
+    (6, 4, 1, 5, 2, 7),
+    (8, 4, 7, 3, 0, 1),
+)
+LUCIEL_ARCANE_PATTERN_POOL: tuple[Pattern, ...] = (
+    LUCIEL_ARCANE_EASY_PATTERNS
+    + LUCIEL_ARCANE_MEDIUM_PATTERNS
+    + LUCIEL_ARCANE_HARD_PATTERNS
 )
 LAYERED_PATTERN_POOL: tuple[tuple[Pattern, Pattern], ...] = (
     ((0, 1, 2), (6, 7, 8)),
@@ -492,13 +523,16 @@ class Ghost:
         self.knockback_elapsed = 0.0
         self.knockback_active = True
 
-    def nullify_gimmick(self) -> None:
+    def nullify_gimmick(self, clear_all_seals: bool = False) -> None:
         self.kind = GhostKind.SLOWPOKE
         self.forbidden_patterns.clear()
         self.resonance_remaining = 0.0
         self.start_locked_slots = [False] * len(self.remaining_patterns)
         self.partial_slots = [False] * len(self.remaining_patterns)
-        self.purify_one()
+        if clear_all_seals:
+            self.sealed_slots.clear()
+        else:
+            self.purify_one()
 
     def apply_random_seal(self, rng: random.Random) -> bool:
         if (
@@ -636,6 +670,8 @@ class PitonBoss:
     spawn_duration: float = 1.0
     hidden_remaining: float = 0.0
     hidden_duration: float = 1.2
+    hidden_fade_duration: float = 0.0
+    hidden_hold_duration: float = 0.0
     pending_x: float = 0.0
     pending_y: float = 0.0
     retreat_repositioned: bool = False
@@ -686,12 +722,28 @@ class PitonBoss:
     @property
     def alpha(self) -> int:
         if self.hidden_remaining > 0:
-            progress = 1.0 - self.hidden_remaining / self.hidden_duration
-            visibility = (
-                1.0 - progress * 2.0
-                if progress < 0.5
-                else (progress - 0.5) * 2.0
-            )
+            elapsed = self.hidden_duration - self.hidden_remaining
+            if self.hidden_fade_duration > 0:
+                if elapsed < self.hidden_fade_duration:
+                    visibility = 1.0 - elapsed / self.hidden_fade_duration
+                elif elapsed < (
+                    self.hidden_fade_duration + self.hidden_hold_duration
+                ):
+                    visibility = 0.0
+                else:
+                    reveal_elapsed = (
+                        elapsed
+                        - self.hidden_fade_duration
+                        - self.hidden_hold_duration
+                    )
+                    visibility = reveal_elapsed / self.hidden_fade_duration
+            else:
+                progress = 1.0 - self.hidden_remaining / self.hidden_duration
+                visibility = (
+                    1.0 - progress * 2.0
+                    if progress < 0.5
+                    else (progress - 0.5) * 2.0
+                )
             return round(255 * max(0.0, min(1.0, visibility)))
         spawn = min(1.0, self.spawn_elapsed / self.spawn_duration)
         vanish = (
@@ -730,11 +782,15 @@ class PitonBoss:
         if self.hidden_remaining > 0:
             before = self.hidden_remaining
             self.hidden_remaining = max(0.0, self.hidden_remaining - seconds)
-            midpoint = self.hidden_duration / 2.0
+            reposition_remaining = (
+                self.hidden_duration - self.hidden_fade_duration
+                if self.hidden_fade_duration > 0
+                else self.hidden_duration / 2.0
+            )
             if (
                 not self.retreat_repositioned
-                and before > midpoint
-                and self.hidden_remaining <= midpoint
+                and before > reposition_remaining
+                and self.hidden_remaining <= reposition_remaining
             ):
                 self.x = self.pending_x
                 self.y = self.pending_y
@@ -935,6 +991,11 @@ class PitonBoss:
             for index in self.sealed_slots
             if index != removed_index
         }
+        self.recently_purified_slots = {
+            index - 1 if index > removed_index else index
+            for index in self.recently_purified_slots
+            if index != removed_index
+        }
         if self.patterns:
             return "hit"
         if self.row_index + 1 >= len(self.rows):
@@ -977,7 +1038,10 @@ class PitonBoss:
             and entered
             and not isinstance(entered[0], tuple)
         ):
-            return pattern_attempt_matches(entered, pattern)
+            return pattern_attempt_matches(
+                entered,
+                mirrored_pattern(pattern, axis),
+            )
         return pattern_attempt_matches(entered, pattern)
 
     def retreat_and_reposition(self, position: tuple[float, float]) -> None:
@@ -1061,19 +1125,97 @@ class WeaverBoss(PitonBoss):
 
 @dataclass
 class LucielBoss(PitonBoss):
-    seal_timer: float = 16.0
-    seal_interval: float = 16.0
+    seal_timer: float = 6.0
+    seal_interval: float = 6.0
+    seal_refill_delay: float = 6.0
+    max_sealed_slots: int = 2
     spell_seal_timer: float = 24.0
     spell_seal_interval: float = 24.0
-    hidden_duration: float = 2.4
+    hidden_duration: float = 9.0
+    hidden_fade_duration: float = 0.5
+    hidden_hold_duration: float = 8.0
     arcane_timer: float = 3.2
     arcane_interval: float = 8.5
     arcane_charge_duration: float = 5.0
     arcane_charge_remaining: float = 0.0
     arcane_pattern: Pattern = (0, 4, 8, 5, 2)
+    arcane_patterns: tuple[Pattern, ...] = LUCIEL_ARCANE_PATTERN_POOL
     arcane_pending_damage: int = 0
     hide_after_hits: int = 2
     hits_until_hide: int = 2
+    corruption_delay: float = 6.0
+    corruption_remaining: float = 0.0
+    corruption_row_index: int = -1
+
+    @property
+    def arcane_phase_patterns(self) -> tuple[Pattern, ...]:
+        if self.row_index == 0:
+            candidates = tuple(
+                pattern for pattern in self.arcane_patterns if len(pattern) <= 3
+            )
+        elif self.row_index == 1:
+            candidates = tuple(
+                pattern
+                for pattern in self.arcane_patterns
+                if 4 <= len(pattern) <= 5
+            )
+        else:
+            candidates = tuple(
+                pattern for pattern in self.arcane_patterns if len(pattern) >= 6
+            )
+        return candidates or self.arcane_patterns
+
+    @property
+    def arcane_phase_duration(self) -> float:
+        if self.row_index == 0:
+            return 5.0
+        if self.row_index == 1:
+            return 8.0
+        return 12.0
+
+    def reveal_now(self) -> bool:
+        if self.hidden_remaining <= 0:
+            return False
+        self.hidden_remaining = 0.0
+        self.retreat_repositioned = False
+        self.spawn_elapsed = self.spawn_duration
+        self.hit_reaction_elapsed = 0.0
+        self.start_moving_immediately()
+        return True
+
+    def purify_current_row(self) -> None:
+        self.sealed_slots.clear()
+        self.patterns = [
+            pattern[0]
+            if pattern and isinstance(pattern[0], tuple)
+            else pattern
+            for pattern in self.patterns
+        ]
+        self.pattern_axes = [""] * len(self.patterns)
+        self.recently_purified_slots = set(range(len(self.patterns)))
+        self.seal_waiting_for_purify = False
+        self.seal_timer = self.seal_interval
+        self.corruption_remaining = self.corruption_delay
+        self.corruption_row_index = self.row_index
+
+    def apply_random_seal(self, rng: random.Random) -> bool:
+        available = [
+            index
+            for index in range(len(self.patterns))
+            if index not in self.sealed_slots
+            and index not in self.recently_purified_slots
+        ]
+        count = min(self.max_sealed_slots - len(self.sealed_slots), len(available))
+        if count <= 0:
+            return False
+        self.sealed_slots.update(rng.sample(available, k=count))
+        self.seal_waiting_for_purify = (
+            len(self.sealed_slots) >= self.max_sealed_slots
+        )
+        return True
+
+    def add_row_transition_seal(self, rng: random.Random) -> None:
+        return
 
     @property
     def arcane_charging(self) -> bool:
@@ -1090,6 +1232,17 @@ class LucielBoss(PitonBoss):
         super().update(seconds, rng)
         if self.defeated or self.hidden_remaining > 0:
             return
+        if self.corruption_remaining > 0:
+            if self.row_index != self.corruption_row_index:
+                self.corruption_remaining = 0.0
+                self.corruption_row_index = -1
+            else:
+                self.corruption_remaining = max(
+                    0.0,
+                    self.corruption_remaining - seconds,
+                )
+                if self.corruption_remaining <= 0:
+                    self._restore_current_row_gimmicks(rng)
         if self.arcane_charging:
             self.arcane_charge_remaining = max(
                 0.0,
@@ -1101,7 +1254,72 @@ class LucielBoss(PitonBoss):
             return
         self.arcane_timer -= seconds
         if self.arcane_timer <= 0:
+            phase_patterns = self.arcane_phase_patterns
+            if phase_patterns:
+                self.arcane_pattern = rng.choice(phase_patterns)
+            self.arcane_charge_duration = self.arcane_phase_duration
             self.arcane_charge_remaining = self.arcane_charge_duration
+
+    def _restore_current_row_gimmicks(self, rng: random.Random) -> None:
+        self.corruption_row_index = -1
+        if not self.patterns:
+            return
+        while len(self.pattern_axes) < len(self.patterns):
+            self.pattern_axes.append("")
+        slot_count = min(3, len(self.patterns))
+        selected_slots = rng.sample(range(len(self.patterns)), k=slot_count)
+        gimmicks = ["layered", "mirrored"]
+        while len(gimmicks) < slot_count:
+            gimmicks.append(rng.choice(("layered", "mirrored")))
+        rng.shuffle(gimmicks)
+        layered_pool = non_spell_layered_patterns(
+            WEAVER_LAYERED_PATTERN_POOL + LAYERED_PATTERN_POOL
+        )
+        plain_pool = non_spell_patterns(
+            STAGE_TWO_PATTERN_POOL + WEAVER_PATTERN_POOL + COMPLEX_PATTERN_POOL
+        )
+        for index, gimmick in zip(selected_slots, gimmicks):
+            if gimmick == "layered":
+                self.patterns[index] = rng.choice(layered_pool)
+                self.pattern_axes[index] = ""
+            else:
+                current = self.patterns[index]
+                axis = rng.choice(("x", "y", "origin"))
+                source_candidates = [
+                    pattern
+                    for pattern in plain_pool
+                    if not pattern_conflicts_spell(
+                        mirrored_pattern(pattern, axis)
+                    )
+                ]
+                source_pattern = (
+                    current
+                    if current
+                    and isinstance(current[0], int)
+                    and not pattern_conflicts_spell(
+                        mirrored_pattern(current, axis)
+                    )
+                    else rng.choice(source_candidates)
+                )
+                self.patterns[index] = source_pattern
+                self.pattern_axes[index] = axis
+        existing_plain = {
+            pattern
+            for pattern in self.patterns
+            if pattern and isinstance(pattern[0], int)
+        }
+        append_candidates = [
+            pattern for pattern in plain_pool if pattern not in existing_plain
+        ]
+        self.patterns.append(
+            rng.choice(append_candidates or list(plain_pool))
+        )
+        self.pattern_axes.append("")
+        self.recently_purified_slots.clear()
+        self.seal_timer = self.seal_interval
+
+    def _update_movement(self, seconds: float) -> None:
+        return
 
     def hit_pattern(self, entered: PatternAttempt, rng: random.Random) -> str:
         if (
@@ -1133,11 +1351,28 @@ class LucielBoss(PitonBoss):
         dy = self.y - self.target_y
         distance = math.hypot(dx, dy) or 1.0
         base_angle = math.atan2(dy, dx)
-        angle = base_angle + rng.choice((-1.0, 1.0)) * rng.uniform(0.9, 1.8)
         radius = max(distance + 90.0, self.radius + 275.0)
+        left = self.target_x - 455.0
+        right = self.target_x + 455.0
+        top = self.target_y - 225.0
+        bottom = self.target_y + 190.0
+        for _ in range(16):
+            angle = (
+                base_angle
+                + rng.choice((-1.0, 1.0)) * rng.uniform(0.9, 1.8)
+            )
+            candidate = (
+                self.target_x + math.cos(angle) * radius,
+                self.target_y + math.sin(angle) * radius,
+            )
+            if (
+                left <= candidate[0] <= right
+                and top <= candidate[1] <= bottom
+            ):
+                return candidate
         return (
-            self.target_x + math.cos(angle) * radius,
-            self.target_y + math.sin(angle) * radius,
+            min(right, max(left, self.target_x + dx / distance * radius)),
+            min(bottom, max(top, self.target_y + dy / distance * radius)),
         )
 
 class PatternInput:
@@ -1307,6 +1542,12 @@ def non_spell_layered_patterns(
     )
 
 
+def pattern_attempt_conflicts_spell(pattern: PatternAttempt) -> bool:
+    if pattern and isinstance(pattern[0], tuple):
+        return any(pattern_conflicts_spell(layer) for layer in pattern)
+    return pattern_conflicts_spell(pattern)  # type: ignore[arg-type]
+
+
 GHOST_SPECS = (
     GhostSpec("Wisp", PATTERN_POOL[0], 14.0, 100, 10, (205, 218, 232)),
     GhostSpec("Shade", PATTERN_POOL[4], 16.0, 130, 12, (205, 218, 232)),
@@ -1438,6 +1679,9 @@ class GameSession:
     boss: Optional[PitonBoss | WeaverBoss] = None
     boss_battle: bool = False
     boss_last_event: str = ""
+    boss_revealed_by_spell: bool = False
+    last_boss_damage_source: str = ""
+    luciel_support_spawned: int = 0
     wave_seals_assigned: int = 0
 
     def reset(self) -> None:
@@ -1455,11 +1699,15 @@ class GameSession:
         self.last_spell_type = None
         self.defeated_events.clear()
         self.boss_last_event = ""
+        self.boss_revealed_by_spell = False
+        self.luciel_support_spawned = 0
         self.wave_required_patterns.clear()
         self.stage_cleared = False
         self.boss = None
         self.boss_battle = False
         self.boss_last_event = ""
+        self.boss_revealed_by_spell = False
+        self.luciel_support_spawned = 0
         self.wave_seals_assigned = 0
         self.fill_wave()
 
@@ -1477,6 +1725,7 @@ class GameSession:
         self.boss = None
         self.boss_battle = False
         self.boss_last_event = ""
+        self.boss_revealed_by_spell = False
         self.wave_seals_assigned = 0
         self.fill_wave()
 
@@ -1550,7 +1799,7 @@ class GameSession:
             )[0]
             if kind is GhostKind.CREEP:
                 pattern_count = max(2, pattern_count)
-            pattern_pool = PATTERN_POOL
+            pattern_pool = non_spell_patterns(PATTERN_POOL)
         remaining_patterns: list[PatternAttempt] = list(
             self.rng.sample(pattern_pool, k=pattern_count)
         )
@@ -1559,11 +1808,34 @@ class GameSession:
         crease_target_pattern: Pattern = ()
         crease_axes: list[str] = []
         if kind is GhostKind.CREASE:
-            source_patterns = self.rng.sample(pattern_pool, k=pattern_count)
-            crease_axes = [
-                self.rng.choices(("x", "y", "origin"), weights=(47, 47, 6), k=1)[0]
-                for _ in source_patterns
-            ]
+            source_patterns = []
+            available_sources = list(pattern_pool)
+            for _ in range(pattern_count):
+                axis = self.rng.choices(
+                    ("x", "y", "origin"),
+                    weights=(47, 47, 6),
+                    k=1,
+                )[0]
+                candidates = [
+                    pattern
+                    for pattern in available_sources
+                    if not pattern_conflicts_spell(
+                        mirrored_pattern(pattern, axis)
+                    )
+                ]
+                if not candidates:
+                    candidates = [
+                        pattern
+                        for pattern in pattern_pool
+                        if not pattern_conflicts_spell(
+                            mirrored_pattern(pattern, axis)
+                        )
+                    ]
+                source = self.rng.choice(candidates)
+                source_patterns.append(source)
+                crease_axes.append(axis)
+                if source in available_sources:
+                    available_sources.remove(source)
             crease_axis = crease_axes[0]
             crease_source_pattern = source_patterns[0]
             remaining_patterns = [
@@ -1600,9 +1872,16 @@ class GameSession:
             ]
             candidates = overlapping or previous_wave_patterns or [
                 pattern
-                for pattern in PATTERN_POOL
+                for pattern in non_spell_patterns(PATTERN_POOL)
                 if pattern not in remaining_patterns
             ]
+            candidates = [
+                pattern
+                for pattern in candidates
+                if not pattern_conflicts_spell(pattern)
+            ]
+            if not candidates:
+                candidates = list(non_spell_patterns(PATTERN_POOL))
             forbidden_patterns = [self.rng.choice(candidates)]
         ghost = Ghost(
             spec,
@@ -1683,7 +1962,9 @@ class GameSession:
             self.kind_queue.pop()
             return None
         short_patterns = tuple(
-            pattern for pattern in PATTERN_POOL if len(pattern) == 3
+            pattern
+            for pattern in non_spell_patterns(PATTERN_POOL)
+            if len(pattern) == 3
         )
         ghost.remaining_patterns = [self.rng.choice(short_patterns)]
         ghost.start_locked_slots = [False]
@@ -1741,10 +2022,14 @@ class GameSession:
 
     def _planned_pattern_pool(self, kind: GhostKind) -> tuple[Pattern, ...]:
         short_patterns = tuple(
-            pattern for pattern in PATTERN_POOL if len(pattern) == 3
+            pattern
+            for pattern in non_spell_patterns(PATTERN_POOL)
+            if len(pattern) == 3
         )
         medium_patterns = tuple(
-            pattern for pattern in PATTERN_POOL if len(pattern) >= 4
+            pattern
+            for pattern in non_spell_patterns(PATTERN_POOL)
+            if len(pattern) >= 4
         )
         if self.stage >= 2:
             if self.wave == 1:
@@ -1757,11 +2042,11 @@ class GameSession:
         if self.wave == 1:
             return short_patterns
         if self.wave == 2:
-            return PATTERN_POOL
+            return non_spell_patterns(PATTERN_POOL)
         if self.wave == 3:
             return medium_patterns
         if kind in (GhostKind.CREEP, GhostKind.START_LOCKED):
-            return COMPLEX_PATTERN_POOL
+            return non_spell_patterns(COMPLEX_PATTERN_POOL)
         return medium_patterns
 
     def advance_wave_if_clear(self) -> bool:
@@ -1808,6 +2093,8 @@ class GameSession:
         self.boss_battle = True
         self.stage_cleared = False
         self.boss_last_event = ""
+        self.boss_revealed_by_spell = False
+        self.luciel_support_spawned = 0
         return self.boss
 
     def start_weaver_battle(
@@ -1926,8 +2213,8 @@ class GameSession:
             pattern_axis_rows.append([axis for _, axis in row_entries])
         arcane_candidates = tuple(
             pattern
-            for pattern in luciel_patterns
-            if len(pattern) >= 5 and not pattern_conflicts_spell(pattern)
+            for pattern in LUCIEL_ARCANE_PATTERN_POOL
+            if not pattern_conflicts_spell(pattern)
         )
         position = self.rng.choice(tuple(spawn_positions))
         self.boss = LucielBoss(
@@ -1941,6 +2228,7 @@ class GameSession:
             movement_duration=3.85,
             pattern_axis_rows=pattern_axis_rows,
             arcane_pattern=self.rng.choice(arcane_candidates),
+            arcane_patterns=arcane_candidates,
         )
         self.boss_battle = True
         self.stage_cleared = False
@@ -1954,27 +2242,181 @@ class GameSession:
     ) -> Optional[Ghost]:
         if not self.boss_battle or self.boss is None or self.boss.defeated:
             return None
+        if isinstance(self.boss, LucielBoss):
+            return self.spawn_luciel_support(spawn_positions, player_position)
         if not self.spawn_queue:
             self.spawn_queue.append(self.rng.choice(GHOST_SPECS[:3]))
-            if isinstance(self.boss, LucielBoss):
-                support_kinds = (
-                    GhostKind.CREEP,
-                    GhostKind.CREASE,
-                    GhostKind.SNARL,
+            support_kinds = (
+                (GhostKind.SLOWPOKE,)
+                if self.boss.row_number == 1
+                else (
+                    GhostKind.SLOWPOKE,
+                    GhostKind.START_LOCKED,
                     GhostKind.FORBIDDEN,
                 )
-            else:
-                support_kinds = (
-                    (GhostKind.SLOWPOKE,)
-                    if self.boss.row_number == 1
-                    else (
-                        GhostKind.SLOWPOKE,
-                        GhostKind.START_LOCKED,
-                        GhostKind.FORBIDDEN,
-                    )
-                )
+            )
             self.kind_queue.append(self.rng.choice(support_kinds))
         return self.spawn_next(spawn_positions, player_position)
+
+    def spawn_luciel_support(
+        self,
+        spawn_positions: Sequence[tuple[float, float]],
+        player_position: tuple[float, float],
+    ) -> Optional[Ghost]:
+        if (
+            not self.boss_battle
+            or not isinstance(self.boss, LucielBoss)
+            or self.boss.defeated
+        ):
+            return None
+        spawn_positions = tuple(
+            position
+            for position in spawn_positions
+            if all(
+                ghost.vanishing
+                or ghost.distance_to(position) >= self.SPAWN_CLEARANCE + 35.0
+                for ghost in self.ghosts
+            )
+        )
+        if not spawn_positions:
+            return None
+        row = self.boss.row_number
+        layered_phase = row == 1 and self.luciel_support_spawned >= 10
+        if layered_phase:
+            kind = self.rng.choices(
+                (GhostKind.SLOWPOKE, GhostKind.CREEP),
+                weights=(72, 28),
+                k=1,
+            )[0]
+            allow_seal = False
+        elif row == 1:
+            kind = GhostKind.SLOWPOKE
+            allow_seal = False
+        elif row == 2:
+            kind = self.rng.choices(
+                (GhostKind.SLOWPOKE, GhostKind.CREASE, GhostKind.SNARL),
+                weights=(58, 20, 22),
+                k=1,
+            )[0]
+            allow_seal = False
+        else:
+            kind = self.rng.choices(
+                (
+                    GhostKind.SLOWPOKE,
+                    GhostKind.CREASE,
+                    GhostKind.SNARL,
+                    GhostKind.CREEP,
+                    GhostKind.FORBIDDEN,
+                ),
+                weights=(26, 20, 20, 20, 14),
+                k=1,
+            )[0]
+            allow_seal = kind in (GhostKind.SLOWPOKE, GhostKind.CREEP)
+
+        base_spec = self.rng.choice(GHOST_SPECS[:2] if row == 1 else GHOST_SPECS[:3])
+        if row == 1 and not layered_phase:
+            spec = replace(
+                base_spec,
+                name=f"Swift {base_spec.name}",
+                speed=base_spec.speed * 2.0,
+                score=base_spec.score + 25,
+                holy_power=base_spec.holy_power,
+            )
+        else:
+            spec = base_spec
+        self.spawn_queue.append(spec)
+        self.kind_queue.append(kind)
+        ghost = self.spawn_next(
+            spawn_positions,
+            player_position,
+            allow_seal=allow_seal,
+        )
+        if ghost is None:
+            if self.spawn_queue:
+                self.spawn_queue.pop()
+            if self.kind_queue:
+                self.kind_queue.pop()
+            return None
+        if layered_phase:
+            ghost.remaining_patterns = [
+                self.rng.choice(
+                    non_spell_layered_patterns(
+                        WEAVER_LAYERED_PATTERN_POOL + LAYERED_PATTERN_POOL
+                    )
+                )
+            ]
+            ghost.sealed_slots.clear()
+            ghost.forbidden_patterns.clear()
+            ghost.start_locked_slots = [False]
+            ghost.partial_slots = [False]
+            ghost.crease_axes.clear()
+            ghost.crease_axis = ""
+            ghost.crease_source_pattern = ()
+            ghost.crease_target_pattern = ()
+        elif row == 1:
+            straight_patterns = non_spell_patterns((
+                (0, 1, 2),
+                (3, 4, 5),
+                (6, 7, 8),
+                (0, 3, 6),
+                (1, 4, 7),
+                (2, 5, 8),
+                (0, 4, 8),
+                (2, 4, 6),
+                (0, 1, 4),
+                (2, 1, 4),
+                (6, 7, 4),
+                (8, 7, 4),
+            ))
+            active_combinations = {
+                tuple(other.remaining_patterns)
+                for other in self.ghosts
+                if other is not ghost
+                and not other.vanishing
+                and len(other.remaining_patterns) >= 2
+            }
+            candidates = [
+                tuple(self.rng.sample(straight_patterns, k=2))
+                for _ in range(24)
+            ]
+            selected = next(
+                (
+                    patterns
+                    for patterns in candidates
+                    if patterns not in active_combinations
+                ),
+                candidates[0],
+            )
+            ghost.remaining_patterns = list(selected)
+            ghost.kind = GhostKind.SLOWPOKE
+            ghost.sealed_slots.clear()
+            ghost.forbidden_patterns.clear()
+            ghost.start_locked_slots = [False for _ in ghost.remaining_patterns]
+            ghost.partial_slots = [False for _ in ghost.remaining_patterns]
+            ghost.crease_axes.clear()
+            ghost.crease_axis = ""
+            ghost.crease_source_pattern = ()
+            ghost.crease_target_pattern = ()
+        elif row >= 2 and ghost.kind is GhostKind.CREASE and self.rng.random() < 0.38:
+            axis = self.rng.choice(("x", "y"))
+            layered_candidates = [
+                layered
+                for layered in non_spell_layered_patterns(LAYERED_PATTERN_POOL)
+                if all(
+                    not pattern_conflicts_spell(mirrored_pattern(layer, axis))
+                    for layer in layered
+                )
+            ]
+            layered = self.rng.choice(layered_candidates)
+            ghost.remaining_patterns[0] = tuple(
+                mirrored_pattern(layer, axis) for layer in layered
+            )
+            ghost.crease_axes = [axis] + ghost.crease_axes[1:]
+            ghost.crease_axis = axis
+            ghost.crease_source_pattern = layered[0]
+            ghost.crease_target_pattern = ghost.remaining_patterns[0][0]
+        self.luciel_support_spawned += 1
+        return ghost
 
     def spawn_weaver_snarl_burst(
         self,
@@ -2017,6 +2459,7 @@ class GameSession:
         player_position: tuple[float, float],
         player_radius: float,
     ) -> int:
+        self.last_boss_damage_source = ""
         if self.boss is None:
             return 0
         self.boss.update(seconds, self.rng)
@@ -2037,6 +2480,7 @@ class GameSession:
             arcane_damage = self.boss.consume_arcane_damage()
             if arcane_damage:
                 self.damage(arcane_damage)
+                self.last_boss_damage_source = "luciel_magic"
                 self.last_message = "Luciel's spell struck you!"
                 return arcane_damage
         if (
@@ -2045,6 +2489,12 @@ class GameSession:
             <= player_radius + self.boss.radius
         ):
             self.damage(2)
+            if isinstance(self.boss, WeaverBoss):
+                self.last_boss_damage_source = "weaver"
+            elif isinstance(self.boss, LucielBoss):
+                self.last_boss_damage_source = "luciel_contact"
+            else:
+                self.last_boss_damage_source = "piton"
             position = self._clear_boss_spawn_position(
                 spawn_positions,
                 player_position,
@@ -2139,6 +2589,7 @@ class GameSession:
         self.last_match_count = 0
         self.last_spell_cast = False
         self.last_spell_type = None
+        self.boss_revealed_by_spell = False
         self.defeated_events.clear()
         if not entered:
             return PatternResult.EMPTY
@@ -2312,6 +2763,8 @@ class GameSession:
             self.spells.clear_cooldown_drags()
             if self.boss is not None and self.boss_battle:
                 originally_sealed_slots = set(self.boss.sealed_slots)
+                if isinstance(self.boss, LucielBoss):
+                    self.boss.purify_current_row()
                 if isinstance(self.boss, WeaverBoss):
                     self.boss.recently_purified_slots.update(
                         self.boss.sealed_slots
@@ -2320,11 +2773,15 @@ class GameSession:
                     self.boss.seal_waiting_for_purify = False
                     self.boss.seal_timer = self.boss.seal_refill_delay
                     self.boss.clear_web_effects()
-                else:
+                elif not isinstance(self.boss, LucielBoss):
                     self.boss.purify_one()
-                boss_result = self.boss.purify_front_pattern(
-                    self.rng,
-                    excluded_slots=originally_sealed_slots,
+                boss_result = (
+                    ""
+                    if isinstance(self.boss, LucielBoss)
+                    else self.boss.purify_front_pattern(
+                        self.rng,
+                        excluded_slots=originally_sealed_slots,
+                    )
                 )
                 if boss_result:
                     self.last_match_count += 1
@@ -2343,9 +2800,13 @@ class GameSession:
                             )
                         )
             for ghost in active_ghosts:
-                ghost.nullify_gimmick()
+                ghost.nullify_gimmick(clear_all_seals=self.stage >= 2)
         elif spell.spell_type is SpellType.TRUTH:
             self.spells.spend(spell)
+            if isinstance(self.boss, LucielBoss):
+                self.boss_revealed_by_spell = (
+                    self.boss.reveal_now()
+                )
             for ghost in self.ghosts:
                 if ghost.kind is GhostKind.CREEP and not ghost.vanishing:
                     ghost.reveal_now()

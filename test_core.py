@@ -17,6 +17,7 @@ from core import (
     WEAVER_PATTERN_POOL,
     WeaverBoss,
     mirrored_pattern,
+    pattern_attempt_conflicts_spell,
     pattern_conflicts_spell,
     pattern_attempt_matches,
 )
@@ -512,6 +513,29 @@ class GameSessionTests(unittest.TestCase):
         self.assertFalse(ghost.apply_random_seal(self.session.rng))
         self.assertEqual(len(ghost.sealed_slots), 1)
 
+    def test_nullify_clears_all_regular_ghost_seals_after_piton(self) -> None:
+        self.session.start_stage(2)
+        ghost = Ghost(
+            GHOST_SPECS[0],
+            700,
+            200,
+            400,
+            300,
+            remaining_patterns=[(0, 1, 2), (3, 4, 5), (6, 7, 8)],
+            sealed_slots={0, 1, 2},
+        )
+        self.session.ghosts = [ghost]
+        nullify = next(
+            spell
+            for spell in SpellManager.SPELLS
+            if spell.spell_type is SpellType.NULLIFY
+        )
+        self.session.spells.holy_power = nullify.cost
+
+        self.session.judge_pattern(nullify.pattern)
+
+        self.assertEqual(ghost.sealed_slots, set())
+
     def test_stage_one_adds_one_sealed_ghost_only_in_final_wave(self) -> None:
         for wave, expected_seals in (
             (1, 0),
@@ -624,7 +648,7 @@ class GameSessionTests(unittest.TestCase):
             self.assertEqual(len(origin_patterns), 1)
             self.assertTrue(is_straight_pattern(origin_patterns[0]))
 
-    def test_weaver_mirrored_slot_requires_unmirrored_input(self) -> None:
+    def test_weaver_mirrored_slot_accepts_the_displayed_pattern(self) -> None:
         boss = self.session.start_weaver_battle(
             ((800.0, 300.0),),
             (400.0, 300.0),
@@ -642,11 +666,29 @@ class GameSessionTests(unittest.TestCase):
 
         self.assertEqual(
             self.session.judge_pattern(displayed_pattern),
-            PatternResult.MISSED,
+            PatternResult.HIT,
         )
-        self.assertEqual(self.session.judge_pattern(pattern), PatternResult.HIT)
 
         self.assertEqual(len(boss.patterns), len(boss.pattern_axes))
+
+    def test_weaver_origin_straight_patterns_accept_the_displayed_path(self) -> None:
+        boss = self.session.start_weaver_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+
+        for row, axes in zip(boss.rows, boss.pattern_axis_rows):
+            boss.pattern_axes = list(axes)
+            origin_index = axes.index("origin")
+            pattern = row[origin_index]
+            displayed = mirrored_pattern(pattern, "origin")
+            self.assertTrue(
+                boss._matches_pattern_slot(
+                    displayed,
+                    pattern,
+                    origin_index,
+                )
+            )
 
     def test_weaver_single_patterns_use_readable_diagonal_paths(self) -> None:
         for pattern in WEAVER_PATTERN_POOL:
@@ -679,7 +721,36 @@ class GameSessionTests(unittest.TestCase):
             any(isinstance(pattern[0], tuple) for row in boss.rows for pattern in row)
         )
         self.assertTrue(any(axis for axes in boss.pattern_axis_rows for axis in axes))
-        self.assertGreaterEqual(len(boss.arcane_pattern), 5)
+        self.assertGreaterEqual(len(boss.arcane_patterns), 6)
+
+    def test_luciel_stays_stationary_without_knockback(self) -> None:
+        boss = self.session.start_luciel_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        start = (boss.x, boss.y)
+        boss.spawn_elapsed = boss.spawn_duration
+
+        self.session.update_boss(4.0, ((800.0, 300.0),), (400.0, 300.0), 44)
+
+        self.assertEqual((boss.x, boss.y), start)
+
+    def test_luciel_progresses_through_four_rows(self) -> None:
+        boss = self.session.start_luciel_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.spawn_elapsed = boss.spawn_duration
+
+        completed_rows = 0
+        while not boss.defeated:
+            boss.sealed_slots.clear()
+            result = boss.remove_pattern_slot(0, self.session.rng)
+            if result in ("row", "defeated"):
+                completed_rows += 1
+
+        self.assertEqual(completed_rows, 4)
+        self.assertEqual(boss.row_index, 3)
 
     def test_luciel_arcane_charge_deals_two_damage_if_not_countered(self) -> None:
         boss = self.session.start_luciel_battle(
@@ -699,6 +770,36 @@ class GameSessionTests(unittest.TestCase):
         )
 
         self.assertEqual(self.session.health, self.session.max_health - 2)
+
+    def test_luciel_arcane_difficulty_scales_by_battle_phase(self) -> None:
+        boss = self.session.start_luciel_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.spawn_elapsed = boss.spawn_duration
+
+        boss.arcane_timer = 0.0
+        boss.update(0.1, self.session.rng)
+        self.assertEqual(boss.arcane_charge_duration, 5.0)
+        self.assertLessEqual(len(boss.arcane_pattern), 3)
+
+        boss.arcane_charge_remaining = 0.0
+        boss.row_index = 1
+        boss.patterns = list(boss.rows[1])
+        boss.pattern_axes = list(boss.pattern_axis_rows[1])
+        boss.arcane_timer = 0.0
+        boss.update(0.1, self.session.rng)
+        self.assertEqual(boss.arcane_charge_duration, 8.0)
+        self.assertIn(len(boss.arcane_pattern), (4, 5))
+
+        boss.arcane_charge_remaining = 0.0
+        boss.row_index = 2
+        boss.patterns = list(boss.rows[2])
+        boss.pattern_axes = list(boss.pattern_axis_rows[2])
+        boss.arcane_timer = 0.0
+        boss.update(0.1, self.session.rng)
+        self.assertEqual(boss.arcane_charge_duration, 12.0)
+        self.assertGreaterEqual(len(boss.arcane_pattern), 6)
 
     def test_luciel_arcane_charge_is_countered_by_required_pattern(self) -> None:
         boss = self.session.start_luciel_battle(
@@ -736,12 +837,301 @@ class GameSessionTests(unittest.TestCase):
         )
         boss.patterns = [boss.patterns[plain_index]]
         boss.pattern_axes = [boss.pattern_axes[plain_index]]
+        displayed_pattern = (
+            mirrored_pattern(boss.patterns[0], boss.pattern_axes[0])
+            if boss.pattern_axes[0]
+            else boss.patterns[0]
+        )
 
-        result = self.session.judge_pattern(boss.patterns[0])
+        result = self.session.judge_pattern(displayed_pattern)
 
         self.assertEqual(result, PatternResult.HIT)
         self.assertGreater(boss.hidden_remaining, 0.0)
         self.assertFalse(boss.is_interactive)
+
+    def test_luciel_stays_fully_hidden_for_eight_seconds(self) -> None:
+        boss = self.session.start_luciel_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.spawn_elapsed = boss.spawn_duration
+        boss.retreat_and_reposition((700.0, 200.0))
+
+        boss.update(0.5, self.session.rng)
+        self.assertEqual(boss.alpha, 0)
+        self.assertFalse(boss.is_interactive)
+
+        boss.update(7.99, self.session.rng)
+        self.assertEqual(boss.alpha, 0)
+        self.assertGreater(boss.hidden_remaining, 0.0)
+        self.assertFalse(boss.is_interactive)
+
+        boss.update(0.5, self.session.rng)
+        self.assertGreater(boss.alpha, 0)
+        self.assertLess(boss.alpha, 255)
+        self.assertFalse(boss.is_interactive)
+
+        boss.update(0.02, self.session.rng)
+        self.assertEqual(boss.hidden_remaining, 0.0)
+        self.assertTrue(boss.is_interactive)
+
+    def test_luciel_first_row_support_is_fast_simple_and_unsealed(self) -> None:
+        boss = self.session.start_luciel_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.spawn_elapsed = boss.spawn_duration
+        straight_patterns = {
+            (0, 1, 2),
+            (3, 4, 5),
+            (6, 7, 8),
+            (0, 3, 6),
+            (1, 4, 7),
+            (2, 5, 8),
+            (0, 4, 8),
+            (2, 4, 6),
+            (0, 1, 4),
+            (2, 1, 4),
+            (6, 7, 4),
+            (8, 7, 4),
+        }
+
+        ghost = self.session.spawn_boss_support(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+
+        self.assertIsNotNone(ghost)
+        assert ghost is not None
+        self.assertEqual(ghost.kind, GhostKind.SLOWPOKE)
+        self.assertGreaterEqual(ghost.spec.speed, GHOST_SPECS[0].speed * 2)
+        self.assertEqual(len(ghost.remaining_patterns), 2)
+        self.assertEqual(len(set(ghost.remaining_patterns)), 2)
+        self.assertTrue(set(ghost.remaining_patterns).issubset(straight_patterns))
+        self.assertEqual(ghost.sealed_slots, set())
+        self.assertEqual(ghost.forbidden_patterns, [])
+
+    def test_luciel_first_row_support_avoids_duplicate_pattern_pairs(self) -> None:
+        boss = self.session.start_luciel_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.spawn_elapsed = boss.spawn_duration
+
+        first = self.session.spawn_luciel_support(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        second = self.session.spawn_luciel_support(
+            ((1000.0, 600.0),),
+            (400.0, 300.0),
+        )
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        assert first is not None and second is not None
+        self.assertNotEqual(
+            tuple(first.remaining_patterns),
+            tuple(second.remaining_patterns),
+        )
+
+    def test_luciel_hidden_reposition_stays_inside_visible_area(self) -> None:
+        boss = self.session.start_luciel_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+
+        for _ in range(100):
+            x, y = boss._hidden_reposition(self.session.rng)
+            self.assertGreaterEqual(x, boss.target_x - 455.0)
+            self.assertLessEqual(x, boss.target_x + 455.0)
+            self.assertGreaterEqual(y, boss.target_y - 225.0)
+            self.assertLessEqual(y, boss.target_y + 190.0)
+
+    def test_nullify_does_not_reveal_hidden_luciel(self) -> None:
+        boss = self.session.start_luciel_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.spawn_elapsed = boss.spawn_duration
+        boss.retreat_and_reposition((700.0, 200.0))
+        nullify = next(
+            spell
+            for spell in SpellManager.SPELLS
+            if spell.spell_type is SpellType.NULLIFY
+        )
+        self.session.spells.holy_power = nullify.cost
+
+        result = self.session.judge_pattern(nullify.pattern)
+
+        self.assertEqual(result, PatternResult.SPELL)
+        self.assertGreater(boss.hidden_remaining, 0.0)
+        self.assertFalse(boss.is_interactive)
+        self.assertFalse(self.session.boss_revealed_by_spell)
+
+    def test_nullify_does_not_reveal_hidden_creep(self) -> None:
+        creep = Ghost(
+            GHOST_SPECS[0],
+            800.0,
+            200.0,
+            400.0,
+            300.0,
+            remaining_patterns=[(0, 1, 2)],
+            kind=GhostKind.CREEP,
+        )
+        creep.hidden_remaining = 4.0
+        self.session.ghosts = [creep]
+        nullify = next(
+            spell
+            for spell in SpellManager.SPELLS
+            if spell.spell_type is SpellType.NULLIFY
+        )
+        self.session.spells.holy_power = nullify.cost
+
+        result = self.session.judge_pattern(nullify.pattern)
+
+        self.assertEqual(result, PatternResult.SPELL)
+        self.assertEqual(creep.hidden_remaining, 4.0)
+        self.assertFalse(creep.is_interactive)
+
+    def test_revelation_also_reveals_hidden_luciel(self) -> None:
+        boss = self.session.start_luciel_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.spawn_elapsed = boss.spawn_duration
+        boss.retreat_and_reposition((700.0, 200.0))
+        revelation = next(
+            spell
+            for spell in SpellManager.SPELLS
+            if spell.spell_type is SpellType.TRUTH
+        )
+        self.session.spells.holy_power = revelation.cost
+
+        result = self.session.judge_pattern(revelation.pattern)
+
+        self.assertEqual(result, PatternResult.SPELL)
+        self.assertEqual(boss.hidden_remaining, 0.0)
+        self.assertTrue(self.session.boss_revealed_by_spell)
+
+    def test_luciel_nullify_clears_all_seals_and_pattern_gimmicks(self) -> None:
+        boss = self.session.start_luciel_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.spawn_elapsed = boss.spawn_duration
+        boss.sealed_slots = {1, 4}
+        before_count = len(boss.patterns)
+        nullify = next(
+            spell
+            for spell in SpellManager.SPELLS
+            if spell.spell_type is SpellType.NULLIFY
+        )
+        self.session.spells.holy_power = nullify.cost
+
+        result = self.session.judge_pattern(nullify.pattern)
+
+        self.assertEqual(result, PatternResult.SPELL)
+        self.assertEqual(len(boss.patterns), before_count)
+        self.assertEqual(boss.sealed_slots, set())
+        self.assertTrue(all(not axis for axis in boss.pattern_axes))
+        self.assertEqual(boss.seal_timer, 6.0)
+        self.assertEqual(boss.corruption_remaining, 6.0)
+
+    def test_luciel_restores_three_gimmicks_and_appends_pattern_after_nullify(
+        self,
+    ) -> None:
+        boss = self.session.start_luciel_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.spawn_elapsed = boss.spawn_duration
+        boss.sealed_slots = {1, 4}
+        before_count = len(boss.patterns)
+        nullify = next(
+            spell
+            for spell in SpellManager.SPELLS
+            if spell.spell_type is SpellType.NULLIFY
+        )
+        self.session.spells.holy_power = nullify.cost
+        self.session.judge_pattern(nullify.pattern)
+
+        boss.update(5.99, self.session.rng)
+        self.assertEqual(boss.sealed_slots, set())
+        self.assertEqual(len(boss.patterns), before_count)
+        boss.update(0.02, self.session.rng)
+
+        gimmick_count = sum(
+            bool(axis) or bool(pattern and isinstance(pattern[0], tuple))
+            for pattern, axis in zip(
+                boss.patterns[:-1],
+                boss.pattern_axes[:-1],
+            )
+        )
+        self.assertEqual(boss.sealed_slots, set())
+        self.assertEqual(len(boss.patterns), before_count + 1)
+        self.assertEqual(len(boss.pattern_axes), before_count + 1)
+        self.assertEqual(gimmick_count, 3)
+        self.assertTrue(
+            any(
+                pattern and isinstance(pattern[0], tuple)
+                for pattern in boss.patterns[:-1]
+            )
+        )
+        self.assertTrue(any(boss.pattern_axes[:-1]))
+        self.assertFalse(boss.pattern_axes[-1])
+
+    def test_luciel_nullify_corruption_does_not_affect_next_row(self) -> None:
+        boss = self.session.start_luciel_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.spawn_elapsed = boss.spawn_duration
+        nullify = next(
+            spell
+            for spell in SpellManager.SPELLS
+            if spell.spell_type is SpellType.NULLIFY
+        )
+        self.session.spells.holy_power = nullify.cost
+        self.session.judge_pattern(nullify.pattern)
+        expected_patterns = list(boss.rows[1])
+        expected_axes = list(boss.pattern_axis_rows[1])
+        boss.patterns = [boss.patterns[0]]
+        boss.pattern_axes = [""]
+
+        result = boss.remove_pattern_slot(0, self.session.rng)
+        boss.update(6.1, self.session.rng)
+
+        self.assertEqual(result, "row")
+        self.assertEqual(boss.row_index, 1)
+        self.assertEqual(boss.patterns, expected_patterns)
+        self.assertEqual(boss.pattern_axes, expected_axes)
+        self.assertEqual(boss.corruption_remaining, 0.0)
+
+    def test_luciel_support_switches_to_layered_patterns_after_ten(self) -> None:
+        boss = self.session.start_luciel_battle(
+            ((800.0, 300.0),),
+            (400.0, 300.0),
+        )
+        boss.spawn_elapsed = boss.spawn_duration
+        self.session.luciel_support_spawned = 10
+        kinds = set()
+
+        for _ in range(40):
+            self.session.ghosts.clear()
+            ghost = self.session.spawn_luciel_support(
+                ((800.0, 300.0),),
+                (400.0, 300.0),
+            )
+            self.assertIsNotNone(ghost)
+            assert ghost is not None
+            self.assertEqual(len(ghost.remaining_patterns), 1)
+            layered = ghost.remaining_patterns[0]
+            self.assertTrue(layered and isinstance(layered[0], tuple))
+            kinds.add(ghost.kind)
+
+        self.assertIn(GhostKind.CREEP, kinds)
+        self.assertIn(GhostKind.SLOWPOKE, kinds)
 
     def test_boss_patterns_do_not_overlap_spell_patterns(self) -> None:
         piton = self.session.start_boss_battle(
@@ -762,8 +1152,11 @@ class GameSessionTests(unittest.TestCase):
                 ((800.0, 300.0),),
                 (400.0, 300.0),
             )
-            for row in weaver.rows:
-                for pattern in row:
+            for row, row_axes in zip(
+                weaver.rows,
+                weaver.pattern_axis_rows,
+            ):
+                for pattern, axis in zip(row, row_axes):
                     if pattern and isinstance(pattern[0], tuple):
                         self.assertTrue(
                             all(
@@ -773,13 +1166,23 @@ class GameSessionTests(unittest.TestCase):
                         )
                     else:
                         self.assertFalse(pattern_conflicts_spell(pattern))
+                        self.assertFalse(
+                            pattern_conflicts_spell(
+                                mirrored_pattern(pattern, axis)
+                                if axis
+                                else pattern
+                            )
+                        )
             luciel = session.start_luciel_battle(
                 ((800.0, 300.0),),
                 (400.0, 300.0),
             )
             self.assertFalse(pattern_conflicts_spell(luciel.arcane_pattern))
-            for row in luciel.rows:
-                for pattern in row:
+            for row, row_axes in zip(
+                luciel.rows,
+                luciel.pattern_axis_rows,
+            ):
+                for pattern, axis in zip(row, row_axes):
                     if pattern and isinstance(pattern[0], tuple):
                         self.assertTrue(
                             all(
@@ -789,6 +1192,45 @@ class GameSessionTests(unittest.TestCase):
                         )
                     else:
                         self.assertFalse(pattern_conflicts_spell(pattern))
+                        self.assertFalse(
+                            pattern_conflicts_spell(
+                                mirrored_pattern(pattern, axis)
+                                if axis
+                                else pattern
+                            )
+                        )
+
+    def test_spawned_ghost_patterns_never_overlap_spell_patterns(self) -> None:
+        for seed in range(30):
+            session = GameSession(rng=random.Random(seed))
+            for stage in (1, 2, 3):
+                session.start_stage(stage)
+                for wave in range(1, session.MAX_WAVES + 1):
+                    session.wave = wave
+                    session.spawn_queue.clear()
+                    session.kind_queue.clear()
+                    session.ghosts.clear()
+                    session.fill_wave()
+                    while session.spawn_queue:
+                        ghost = session.spawn_next(
+                            ((800.0, 300.0),),
+                            (400.0, 300.0),
+                        )
+                        self.assertIsNotNone(ghost)
+                        assert ghost is not None
+                        self.assertTrue(
+                            all(
+                                not pattern_attempt_conflicts_spell(pattern)
+                                for pattern in ghost.remaining_patterns
+                            )
+                        )
+                        self.assertTrue(
+                            all(
+                                not pattern_conflicts_spell(pattern)
+                                for pattern in ghost.forbidden_patterns
+                            )
+                        )
+                        session.ghosts.clear()
 
     def test_weaver_timed_snarl_burst_spawns_three_snarl_ghosts(self) -> None:
         boss = self.session.start_weaver_battle(
@@ -900,7 +1342,7 @@ class GameSessionTests(unittest.TestCase):
 
         self.assertEqual(boss.sealed_slots, set())
         self.assertEqual(boss.active_web_lanes, {})
-        self.assertEqual(boss.recently_purified_slots, {0, 1, 3})
+        self.assertEqual(boss.recently_purified_slots, {0, 1, 2})
 
     def test_sanctify_permanently_removes_front_unsealed_boss_pattern(self) -> None:
         boss = self.session.start_boss_battle(

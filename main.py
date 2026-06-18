@@ -69,6 +69,7 @@ BGM_TRACKS: dict[str, tuple[str, ...]] = {
     "boss1": ("Pition_bgm.mp3",),
     "boss2": ("Weaver_bgm.mp3",),
     "final_boss": ("Veil of Lucien.mp3",),
+    "ending": ("ending_bgm.mp3",),
 }
 
 
@@ -199,6 +200,7 @@ class ExorcismGame:
         self.clock = pygame.time.Clock()
         korean_font_path = self._korean_font_path()
         self.font_small = pygame.font.Font(korean_font_path, 21)
+        self.spell_description_font = pygame.font.Font(korean_font_path, 15)
         self.font = pygame.font.Font(korean_font_path, 28)
         self.font_large = pygame.font.Font(korean_font_path, 48)
         self.font_title = pygame.font.Font(korean_font_path, 82)
@@ -285,6 +287,7 @@ class ExorcismGame:
         self.defeat_background = self._load_cover_image(
             "peter_defeat_scene.png"
         )
+        self.ending_background = self._load_cover_image("ending_scene.png")
         self.stage_backgrounds = {
             1: self._load_cover_image("stage1.png"),
             2: self._load_cover_image("stage2.png"),
@@ -351,6 +354,11 @@ class ExorcismGame:
             Path(__file__).with_name("exorcism_sceen1.mp4")
         )
         self.tutorial_video_channel: pygame.mixer.Channel | None = None
+        self.intro_atmosphere_sound = self._load_audio_sound(
+            Path(__file__).with_name("intro_atmosphere.mp3"),
+            start_seconds=8.0,
+        )
+        self.intro_atmosphere_channel: pygame.mixer.Channel | None = None
         self.magic_spell_sound = self._load_audio_sound(
             Path(__file__).with_name("magic_spell.mp3"),
             volume_gain=1.0,
@@ -365,6 +373,7 @@ class ExorcismGame:
             "그 목소리의 근원... 확인해야겠군",
         )
         self.story_dialogue_lines = self.intro_story_dialogue_lines
+        self.story_dialogue_speakers: tuple[str, ...] = ()
         self.stage_four_dialogue_lines = (
             "본관 안쪽인가... 공기가 달라졌군.",
             "더 깊은 곳에서 영혼의 흔적이 느껴진다.",
@@ -406,7 +415,12 @@ class ExorcismGame:
         self.stage_three_video: VideoPlayer | None = None
         self.stage_three_video_sound: pygame.mixer.Sound | None = None
         self.stage_three_video_channel: pygame.mixer.Channel | None = None
+        self.stage_three_video_number = 7
         self.boss_support_timer = 4.5
+        self.luciel_orbit_spawn_timer = 0.0
+        self.luciel_orbit_spawn_pairs_remaining = 0
+        self.luciel_orbit_spawn_index = 0
+        self.luciel_summon_disrupted = False
         self.seal_support_timer = 0.0
         self.boss_epilogue_elapsed = 0.0
         self.boss_epilogue_duration = 1.8
@@ -415,9 +429,16 @@ class ExorcismGame:
         self.defeat_transition_elapsed = 0.0
         self.defeat_transition_duration = 1.4
         self.defeat_scene_ready = False
+        self.ending_scene_elapsed = 0.0
+        self.ending_scene_fade_duration = 2.0
+        self.retry_stage = 1
+        self.stage_checkpoint_score = 0
         self.peter_speak_sound = self._load_sound("peter_speak.wav")
         if self.peter_speak_sound is not None:
             self.peter_speak_sound.set_volume(0.42)
+        self.luciel_speak_sound = self._load_sound("luciel_speak.wav")
+        if self.luciel_speak_sound is not None:
+            self.luciel_speak_sound.set_volume(0.42)
         self.boo_sounds = [
             sound
             for filename in ("boo1.mp3", "boo2.mp3", "boo3.mp3")
@@ -428,6 +449,30 @@ class ExorcismGame:
         self.ghost_defeated_sound = self._load_sound("ghost_defeated.mp3")
         if self.ghost_defeated_sound is not None:
             self.ghost_defeated_sound.set_volume(0.85)
+        self.attacked_sound = self._load_sound("attacked.mp3")
+        self.piton_attack_sound = self._load_sound("piton_attack.mp3")
+        self.piton_death_sound = self._load_sound("piton_death.mp3")
+        self.weaver_attack_sound = self._load_sound("weaver_attack.mp3")
+        self.weaver_death_sound = self._load_sound("weaver_death.mp3")
+        self.weaver_web_sound = self._load_sound("weaver_web.mp3")
+        self.luciel_disappear_sound = self._load_sound("luciel_disappear.mp3")
+        self.luciel_magic_attack_sound = self._load_sound(
+            "luciel_magic_attack.mp3"
+        )
+        self.combat_event_sounds = tuple(
+            sound
+            for sound in (
+                self.attacked_sound,
+                self.piton_attack_sound,
+                self.piton_death_sound,
+                self.weaver_attack_sound,
+                self.weaver_death_sound,
+                self.weaver_web_sound,
+                self.luciel_disappear_sound,
+                self.luciel_magic_attack_sound,
+            )
+            if sound is not None
+        )
         self.ghost_boo_channels: dict[int, pygame.mixer.Channel] = {}
         self._apply_audio_settings()
         self._sync_bgm_to_state()
@@ -534,15 +579,48 @@ class ExorcismGame:
             return "title"
         if self.state == "gameover":
             return "gameover"
+        if self.state == "ending_scene":
+            return "ending"
+        if (
+            self.session.stage == 2
+            and self.state in (
+                "weaver_epilogue_transition",
+                "weaver_epilogue_video",
+                "story",
+                "story_transition",
+                "weaver_purify_prompt",
+                "weaver_purify_transition",
+                "stage_three_video",
+            )
+        ):
+            return "stage2"
+        if (
+            self.state == "story"
+            and self.story_next_action == "stage_4_video"
+        ):
+            return "stage1"
+        if (
+            self.state in ("story", "story_transition")
+            and self.story_destination_stage == 2
+        ):
+            return "stage2"
+        if self.state in (
+            "stage_end_transition",
+            "stage_end_video",
+        ):
+            return "stage2"
+        if self.state == "boss_epilogue_transition":
+            return "stage1"
         if self.state in (
             "tutorial",
             "story",
             "story_transition",
-            "stage_end_video",
             "weaver_epilogue_video",
+            "weaver_epilogue_transition",
             "weaver_purify_prompt",
             "weaver_purify_transition",
             "stage_three_video",
+            "luciel_ending_video",
             "defeat_transition",
         ):
             return None
@@ -554,9 +632,7 @@ class ExorcismGame:
             "stage_intro",
             "stage_intro_transition",
             "stage_three_transition",
-            "stage_end_transition",
-            "boss_epilogue_transition",
-            "weaver_epilogue_transition",
+            "luciel_ending_transition",
         ):
             if self.session.boss_battle and self.session.boss is not None:
                 if self.session.stage >= 3:
@@ -602,6 +678,13 @@ class ExorcismGame:
         self.state = "tutorial"
         if self.tutorial_video_sound is not None:
             self.tutorial_video_channel = self.tutorial_video_sound.play()
+        if (
+            self.intro_atmosphere_sound is not None
+            and self.intro_atmosphere_channel is None
+        ):
+            self.intro_atmosphere_channel = self.intro_atmosphere_sound.play(
+                loops=-1
+            )
         self.tutorial_video.sync_start()
         self._apply_audio_settings()
 
@@ -609,6 +692,8 @@ class ExorcismGame:
         pygame.mixer.music.set_volume(BGM_VOLUME_SCALE * self.bgm_volume)
         if self.tutorial_video_channel is not None:
             self.tutorial_video_channel.set_volume(self.sfx_volume)
+        if self.intro_atmosphere_channel is not None:
+            self.intro_atmosphere_channel.set_volume(0.12 * self.bgm_volume)
         if self.story_video_channel is not None:
             self.story_video_channel.set_volume(0.72 * self.sfx_volume)
         if self.boss_video_channel is not None:
@@ -621,12 +706,16 @@ class ExorcismGame:
             self.stage_three_video_channel.set_volume(0.95 * self.sfx_volume)
         if self.peter_speak_sound is not None:
             self.peter_speak_sound.set_volume(0.42 * self.sfx_volume)
+        if self.luciel_speak_sound is not None:
+            self.luciel_speak_sound.set_volume(0.42 * self.sfx_volume)
         for sound in self.boo_sounds:
             sound.set_volume(0.72 * self.sfx_volume)
         if self.ghost_defeated_sound is not None:
             self.ghost_defeated_sound.set_volume(0.85 * self.sfx_volume)
         if self.magic_spell_sound is not None:
             self.magic_spell_sound.set_volume(self.sfx_volume)
+        for sound in self.combat_event_sounds:
+            sound.set_volume(0.82 * self.sfx_volume)
 
     def _load_player_images(self) -> list[pygame.Surface]:
         frames = [
@@ -725,6 +814,7 @@ class ExorcismGame:
             self.stage_three_video.close()
         if self.tutorial_video_channel is not None:
             self.tutorial_video_channel.stop()
+        self._stop_intro_atmosphere()
         if self.story_video_channel is not None:
             self.story_video_channel.stop()
         if self.boss_video_channel is not None:
@@ -743,7 +833,10 @@ class ExorcismGame:
 
     def _start_game(self) -> None:
         self._stop_all_ghost_boo()
+        self._stop_intro_atmosphere()
         self.session.reset()
+        self.retry_stage = 1
+        self.stage_checkpoint_score = 0
         self.pattern_input.clear()
         self.last_drag_position = None
         self.success_pattern = ()
@@ -766,6 +859,11 @@ class ExorcismGame:
         self.message_timer = 0.0
         self._begin_stage_intro(1)
 
+    def _stop_intro_atmosphere(self) -> None:
+        if self.intro_atmosphere_channel is not None:
+            self.intro_atmosphere_channel.stop()
+            self.intro_atmosphere_channel = None
+
     def _begin_stage_intro(self, stage: int) -> None:
         self.stage_intro_pending = True
         self.stage_intro_elapsed = 0.0
@@ -780,6 +878,14 @@ class ExorcismGame:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
+            elif (
+                event.type == pygame.KEYDOWN
+                and event.key == pygame.K_l
+                and event.mod & pygame.KMOD_CTRL
+                and event.mod & pygame.KMOD_SHIFT
+            ):
+                self._skip_to_luciel_battle()
+                continue
             elif self.screen_transition_target is not None:
                 continue
             elif (
@@ -822,12 +928,12 @@ class ExorcismGame:
                 self._handle_story_event(event)
             elif self.state == "gameover":
                 if self.retry_button.clicked(event):
-                    self._start_game()
+                    self._retry_from_gameover()
                 elif event.type == pygame.KEYDOWN and event.key in (
                     pygame.K_RETURN,
                     pygame.K_SPACE,
                 ):
-                    self._start_game()
+                    self._retry_from_gameover()
             elif self.state == "playing":
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_p:
                     self._pause_game()
@@ -837,7 +943,7 @@ class ExorcismGame:
                 if self.resume_button.clicked(event):
                     self._resume_game()
                 elif self.pause_restart_button.clicked(event):
-                    self._start_game()
+                    self._restart_current_stage()
                 elif event.type == pygame.KEYDOWN and event.key in (
                     pygame.K_p,
                     pygame.K_RETURN,
@@ -981,6 +1087,7 @@ class ExorcismGame:
         self.story_destination_stage = 1
         self.story_next_action = "stage_1"
         self.story_dialogue_lines = self.intro_story_dialogue_lines
+        self.story_dialogue_speakers = ()
         self.story_dialogue_index = 0
         self.story_dialogue_elapsed = 0.0
         self.story_dialogue_typing_elapsed = 0.0
@@ -1039,7 +1146,9 @@ class ExorcismGame:
             self.story_video.close()
 
     def _prepare_game_after_story(self) -> None:
-        if self.story_destination_stage == 2:
+        if self.story_destination_stage == 3:
+            self._prepare_stage_three()
+        elif self.story_destination_stage == 2:
             self._prepare_stage_two()
         else:
             self._start_game()
@@ -1127,6 +1236,7 @@ class ExorcismGame:
             "봉인이 깊다. 누군가 안쪽을 철저히 감추고 있어.",
             "저 문 너머에서... 지금까지와는 다른 기운이..",
         )
+        self.story_dialogue_speakers = ()
         self.story_dialogue_index = 0
         self.story_dialogue_elapsed = 0.0
         self.story_dialogue_typing_elapsed = 0.0
@@ -1150,8 +1260,9 @@ class ExorcismGame:
         self.story_video_channel = None
         self.state = "story"
 
-    def _start_stage_three_video(self) -> None:
-        video_path = Path(__file__).with_name("exorcism7.mp4")
+    def _start_stage_three_video(self, video_number: int = 7) -> None:
+        self.stage_three_video_number = video_number
+        video_path = Path(__file__).with_name(f"exorcism{video_number}.mp4")
         if self.weaver_epilogue_video_channel is not None:
             self.weaver_epilogue_video_channel.stop()
             self.weaver_epilogue_video_channel = None
@@ -1168,11 +1279,49 @@ class ExorcismGame:
         self._apply_audio_settings()
         self.state = "stage_three_video"
 
+    def _start_luciel_intro_dialogue(self) -> None:
+        self.story_dialogue_lines = (
+            "끝내, 여기까지 왔군.",
+            "너인가. 이 저택의 영혼들을 묶어둔 자.",
+            "묶은 게 아니다. 흩어지지 않게 붙잡아 둔 것뿐이지.",
+            "너희 사제들은 늘... 끝난 뒤에야 찾아오지 않던가?",
+        )
+        self.story_dialogue_speakers = (
+            "LUCIEL",
+            "PETER",
+            "LUCIEL",
+            "LUCIEL",
+        )
+        self.story_dialogue_index = 0
+        self.story_dialogue_elapsed = 0.0
+        self.story_dialogue_typing_elapsed = 0.0
+        self.story_dialogue_visible_characters = 0
+        self.story_dialogue_spoken_pairs = 0
+        self.story_prompt_elapsed = 0.0
+        self.story_dialogue_active = False
+        self.story_dialogue_phase = "fade_in"
+        self.story_transition_elapsed = 0.0
+        self.story_game_ready = False
+        self.story_destination_stage = 3
+        self.story_next_action = "stage_3"
+        self.story_background = (
+            self.stage_three_video.surface.copy()
+            if self.stage_three_video is not None
+            and self.stage_three_video.surface is not None
+            else None
+        )
+        self.story_video = None
+        self.story_video_sound = None
+        self.story_video_channel = None
+        self.state = "story"
+
     def _prepare_stage_three(self) -> None:
         self._stop_all_ghost_boo()
+        self._stop_intro_atmosphere()
         if self.stage_three_video_channel is not None:
             self.stage_three_video_channel.stop()
             self.stage_three_video_channel = None
+        self.stage_checkpoint_score = self.session.score
         self.session.start_stage(3)
         self.session.start_luciel_battle(SPAWN_POSITIONS, PLAYER_POSITION)
         self.pattern_input.clear()
@@ -1190,6 +1339,10 @@ class ExorcismGame:
         self.grid_intro_elapsed = 0.0
         self.spawn_timer = self.grid_intro_duration + 0.25
         self.boss_support_timer = 3.0
+        self.luciel_orbit_spawn_timer = 0.0
+        self.luciel_orbit_spawn_pairs_remaining = 3
+        self.luciel_orbit_spawn_index = 0
+        self.luciel_summon_disrupted = False
         self.message_timer = 0.0
         self.boss_epilogue_started = False
         self.seal_support_timer = 0.0
@@ -1249,6 +1402,12 @@ class ExorcismGame:
             and self.story_next_action == "weaver_purify_prompt"
         ):
             self._start_weaver_purify_prompt()
+            return
+        if (
+            self.state in ("story", "story_transition")
+            and self.story_next_action == "stage_3"
+        ):
+            self._prepare_stage_three()
             return
         if self.state in ("tutorial", "story", "story_transition"):
             self._skip_intro()
@@ -1321,6 +1480,27 @@ class ExorcismGame:
         self.state = "playing"
         self.grid_intro_elapsed = 0.0
 
+    def _skip_to_luciel_battle(self) -> None:
+        self.screen_transition_target = None
+        for channel_name in (
+            "tutorial_video_channel",
+            "story_video_channel",
+            "boss_video_channel",
+            "stage_end_video_channel",
+            "weaver_epilogue_video_channel",
+            "stage_three_video_channel",
+        ):
+            channel = getattr(self, channel_name)
+            if channel is not None:
+                channel.stop()
+                setattr(self, channel_name, None)
+        self.magic_spell_channel.stop()
+        self.story_dialogue_active = False
+        self.story_game_ready = False
+        self.story_next_action = ""
+        self._prepare_stage_three()
+        self._sync_bgm_to_state()
+
     def _skip_to_boss_epilogue(self) -> None:
         boss = self.session.boss
         if boss is None:
@@ -1342,6 +1522,8 @@ class ExorcismGame:
 
     def _prepare_stage_two(self) -> None:
         self._stop_all_ghost_boo()
+        self._stop_intro_atmosphere()
+        self.stage_checkpoint_score = self.session.score
         self.session.start_stage(2)
         self.pattern_input.clear()
         self.last_drag_position = None
@@ -1372,6 +1554,26 @@ class ExorcismGame:
         self._stop_all_ghost_boo()
         self.state = "boss_epilogue_transition"
 
+    def _start_luciel_ending_transition(self) -> None:
+        if self.boss_epilogue_started:
+            return
+        self.boss_epilogue_started = True
+        self.boss_epilogue_elapsed = 0.0
+        self.pattern_input.clear()
+        self._stop_all_ghost_boo()
+        self.state = "luciel_ending_transition"
+
+    def _start_luciel_ending_video(self) -> None:
+        self._start_stage_three_video(9)
+        self.state = "luciel_ending_video"
+
+    def _start_ending_scene(self) -> None:
+        if self.stage_three_video_channel is not None:
+            self.stage_three_video_channel.stop()
+            self.stage_three_video_channel = None
+        self.ending_scene_elapsed = 0.0
+        self.state = "ending_scene"
+
     def _start_weaver_epilogue_transition(self) -> None:
         if self.boss_epilogue_started:
             return
@@ -1388,6 +1590,7 @@ class ExorcismGame:
             "누군가 이들을 묶고, 본관 쪽으로 흘려보낸 것이겠지.",
             "의뢰인은 창고를 말했지만... 진짜 근원은 저택 안쪽이군.",
         )
+        self.story_dialogue_speakers = ()
         self.story_dialogue_index = 0
         self.story_dialogue_elapsed = 0.0
         self.story_dialogue_typing_elapsed = 0.0
@@ -1409,6 +1612,7 @@ class ExorcismGame:
     def _start_stage_four_video(self) -> None:
         video_path = Path(__file__).with_name("exorcism4.mp4")
         self.story_dialogue_lines = self.stage_four_dialogue_lines
+        self.story_dialogue_speakers = ()
         self.story_dialogue_index = 0
         self.story_dialogue_elapsed = 0.0
         self.story_dialogue_typing_elapsed = 0.0
@@ -1437,11 +1641,29 @@ class ExorcismGame:
     def _start_defeat_transition(self) -> None:
         if self.state in ("defeat_transition", "gameover"):
             return
+        self.retry_stage = self.session.stage
         self.state = "defeat_transition"
         self.defeat_transition_elapsed = 0.0
         self.defeat_scene_ready = False
         self.pattern_input.clear()
         self._stop_all_ghost_boo()
+
+    def _retry_from_gameover(self) -> None:
+        self._restart_current_stage(self.retry_stage)
+
+    def _restart_current_stage(self, stage: int | None = None) -> None:
+        retry_stage = min(3, max(1, stage or self.session.stage))
+        self.session.score = self.stage_checkpoint_score
+        self.session.health = self.session.max_health
+        self.defeat_transition_elapsed = 0.0
+        self.defeat_scene_ready = False
+        self.screen_transition_target = None
+        if retry_stage == 3:
+            self._prepare_stage_three()
+        elif retry_stage == 2:
+            self._prepare_stage_two()
+        else:
+            self._start_game()
 
     def _pause_game(self) -> None:
         self.pattern_input.clear()
@@ -1507,15 +1729,23 @@ class ExorcismGame:
     def _submit_pattern(
         self, pattern: tuple[int, ...] | tuple[tuple[int, ...], tuple[int, ...]]
     ) -> PatternResult:
+        boss = self.session.boss
+        boss_was_hidden = (
+            isinstance(boss, LucielBoss) and boss.hidden_remaining > 0
+        )
         previously_vanishing = {
             id(ghost) for ghost in self.session.ghosts if ghost.vanishing
         }
         result = self.session.judge_pattern(pattern)
-        if (
-            self.session.boss_last_event == "defeated"
-            and self.ghost_defeated_sound is not None
-        ):
-            self.ghost_defeated_sound.play()
+        if self.session.boss_last_event == "defeated":
+            if isinstance(boss, WeaverBoss):
+                if self.weaver_death_sound is not None:
+                    self.weaver_death_sound.play()
+            elif isinstance(boss, LucielBoss):
+                boss.fade_remaining = boss.fade_duration
+                self._start_luciel_ending_transition()
+            elif self.piton_death_sound is not None:
+                self.piton_death_sound.play()
         defeated_ghosts = [
             ghost
             for ghost in self.session.ghosts
@@ -1531,6 +1761,17 @@ class ExorcismGame:
         if self.session.last_spell_cast:
             self.spell_pattern = pattern
             self.spell_timer = self.spell_duration
+        if self.session.boss_revealed_by_spell:
+            self.luciel_orbit_spawn_pairs_remaining = 0
+            self.luciel_summon_disrupted = True
+            self.boss_support_timer = 5.5
+        if (
+            isinstance(boss, LucielBoss)
+            and not boss_was_hidden
+            and boss.hidden_remaining > 0
+            and self.luciel_disappear_sound is not None
+        ):
+            self.luciel_disappear_sound.play()
         for x, y, amount in self.session.defeated_events:
             self.reward_orbs.append(
                 {
@@ -1681,6 +1922,19 @@ class ExorcismGame:
         if self.state == "stage_three_video":
             self._update_stage_three_video(seconds)
             return
+        if self.state == "luciel_ending_video":
+            if self.stage_three_video is not None:
+                if not self.stage_three_video.ended:
+                    self.stage_three_video.update(seconds)
+                if self.stage_three_video.ended:
+                    self._start_ending_scene()
+            return
+        if self.state == "ending_scene":
+            self.ending_scene_elapsed = min(
+                self.ending_scene_fade_duration,
+                self.ending_scene_elapsed + seconds,
+            )
+            return
         if self.state == "stage_three_transition":
             self._update_stage_three_transition(seconds)
             return
@@ -1703,6 +1957,14 @@ class ExorcismGame:
             return
         if self.state == "boss_epilogue_transition":
             self._update_boss_epilogue_transition(seconds)
+            return
+        if self.state == "luciel_ending_transition":
+            self.boss_epilogue_elapsed = min(
+                self.boss_epilogue_duration,
+                self.boss_epilogue_elapsed + seconds,
+            )
+            if self.boss_epilogue_elapsed >= self.boss_epilogue_duration:
+                self._start_luciel_ending_video()
             return
         if self.state == "weaver_epilogue_transition":
             self._update_weaver_epilogue_transition(seconds)
@@ -1778,10 +2040,14 @@ class ExorcismGame:
         ):
             if isinstance(boss, WeaverBoss):
                 self._start_weaver_epilogue_transition()
+            elif isinstance(boss, LucielBoss):
+                self._start_luciel_ending_transition()
             else:
                 self._start_boss_epilogue_transition()
             return
         if escaped:
+            if self.attacked_sound is not None:
+                self.attacked_sound.play()
             self.message_timer = 1.8
             self.flash_color = RED
             self.flash_timer = 0.22
@@ -1895,9 +2161,18 @@ class ExorcismGame:
                 + 1,
             )
             spoken_pairs = visible_characters // 2
-            for _ in range(self.story_dialogue_spoken_pairs, spoken_pairs):
-                if self.peter_speak_sound is not None:
-                    self.peter_speak_sound.play()
+            speaker_name = (
+                self.story_dialogue_speakers[self.story_dialogue_index]
+                if self.story_dialogue_index < len(self.story_dialogue_speakers)
+                else "PETER"
+            )
+            speak_sound = {
+                "PETER": self.peter_speak_sound,
+                "LUCIEL": self.luciel_speak_sound,
+            }.get(speaker_name)
+            if speak_sound is not None:
+                for _ in range(self.story_dialogue_spoken_pairs, spoken_pairs):
+                    speak_sound.play()
             self.story_dialogue_visible_characters = visible_characters
             self.story_dialogue_spoken_pairs = spoken_pairs
             typing_duration = (
@@ -2033,11 +2308,12 @@ class ExorcismGame:
                 if self.stage_three_video_channel is not None:
                     self.stage_three_video_channel.stop()
                     self.stage_three_video_channel = None
-                self.stage_intro_transition_elapsed = 0.0
-                self.state = "stage_three_transition"
+                if self.stage_three_video_number == 7:
+                    self._start_stage_three_video(8)
+                    return
+                self._start_luciel_intro_dialogue()
         else:
-            self.stage_intro_transition_elapsed = 0.0
-            self.state = "stage_three_transition"
+            self._start_luciel_intro_dialogue()
 
     def _update_stage_three_transition(self, seconds: float) -> None:
         self.stage_intro_transition_elapsed = min(
@@ -2102,6 +2378,12 @@ class ExorcismGame:
         boss = self.session.boss
         if boss is None:
             return
+        boss_was_hidden = boss.hidden_remaining > 0
+        web_lanes_before = (
+            set(boss.active_web_lanes)
+            if isinstance(boss, WeaverBoss)
+            else set()
+        )
         damage = self.session.update_boss(
             seconds,
             SPAWN_POSITIONS,
@@ -2111,9 +2393,35 @@ class ExorcismGame:
         if damage:
             self.flash_color = RED
             self.flash_timer = 0.3
+            attack_sound = {
+                "piton": self.piton_attack_sound,
+                "weaver": self.weaver_attack_sound,
+                "luciel_magic": self.luciel_magic_attack_sound,
+            }.get(self.session.last_boss_damage_source)
+            if attack_sound is not None:
+                attack_sound.play()
+        if (
+            isinstance(boss, WeaverBoss)
+            and set(boss.active_web_lanes) - web_lanes_before
+            and self.weaver_web_sound is not None
+        ):
+            self.weaver_web_sound.play()
+        if (
+            isinstance(boss, LucielBoss)
+            and not boss_was_hidden
+            and boss.hidden_remaining > 0
+            and self.luciel_disappear_sound is not None
+        ):
+            self.luciel_disappear_sound.play()
         if boss.defeated:
             return
-        self.boss_support_timer -= seconds
+        support_timer_rate = (
+            1.5
+            if isinstance(boss, LucielBoss)
+            and boss.hidden_remaining > 0
+            else 1.0
+        )
+        self.boss_support_timer -= seconds * support_timer_rate
         if (
             isinstance(boss, WeaverBoss)
             and (
@@ -2131,29 +2439,84 @@ class ExorcismGame:
                 self.boss_support_timer = 2.0
             return
         if isinstance(boss, LucielBoss):
-            support_limit = 5
+            if self._update_luciel_orbit_spawns(seconds):
+                return
+            support_limit = (
+                4
+                if self.luciel_summon_disrupted
+                else 6
+                if boss.row_number == 1
+                else 5
+            )
         elif isinstance(boss, WeaverBoss):
             support_limit = 4
         else:
             support_limits = (4, 5, 6)
             support_limit = support_limits[boss.row_index]
         if self.boss_support_timer <= 0 and len(self.session.ghosts) < support_limit:
-            ghost = self.session.spawn_boss_support(
-                SPAWN_POSITIONS,
-                PLAYER_POSITION,
+            spawn_count = (
+                2
+                if isinstance(boss, LucielBoss)
+                and boss.row_number == 1
+                and self.session.luciel_support_spawned >= 10
+                else 1
             )
-            if ghost is not None:
-                self._play_ghost_spawn_sound(ghost)
+            spawn_count = min(
+                spawn_count,
+                support_limit - len(self.session.ghosts),
+            )
+            spawned_ghosts = []
+            for _ in range(spawn_count):
+                ghost = self.session.spawn_boss_support(
+                    SPAWN_POSITIONS,
+                    PLAYER_POSITION,
+                )
+                if ghost is not None:
+                    spawned_ghosts.append(ghost)
+                    self._play_ghost_spawn_sound(ghost)
             intervals = (3.8, 2.7, 1.8)
             if isinstance(boss, LucielBoss):
-                interval = 4.6
+                interval = (2.2, 3.2, 4.0, 3.6)[boss.row_index]
+                if boss.row_number == 1 and self.session.luciel_support_spawned >= 10:
+                    interval = 4.0
+                if self.luciel_summon_disrupted:
+                    interval = max(4.2, interval)
+                if boss.hidden_remaining > 0:
+                    interval /= 1.5
             elif isinstance(boss, WeaverBoss):
                 interval = 6.8
             else:
                 interval = (2.4, 1.9, 1.45)[boss.row_index]
             self.boss_support_timer = (
-                interval if ghost is not None else 0.25
+                interval if spawned_ghosts else 0.25
             )
+
+    def _update_luciel_orbit_spawns(self, seconds: float) -> bool:
+        boss = self.session.boss
+        if (
+            not isinstance(boss, LucielBoss)
+            or boss.row_number != 1
+            or self.luciel_orbit_spawn_pairs_remaining <= 0
+        ):
+            return False
+        self.luciel_orbit_spawn_timer -= seconds
+        if self.luciel_orbit_spawn_timer > 0:
+            return True
+        lane = self.luciel_orbit_spawn_index % 4
+        opposite_lane = lane + 4
+        for index in (lane, opposite_lane):
+            ghost = self.session.spawn_luciel_support(
+                (SPAWN_POSITIONS[index],),
+                PLAYER_POSITION,
+            )
+            if ghost is not None:
+                self._play_ghost_spawn_sound(ghost)
+        self.luciel_orbit_spawn_index += 1
+        self.luciel_orbit_spawn_pairs_remaining -= 1
+        self.luciel_orbit_spawn_timer = 0.5
+        if self.luciel_orbit_spawn_pairs_remaining <= 0:
+            self.boss_support_timer = 3.0
+        return True
 
     def _update_defeat_transition(self, seconds: float) -> None:
         self.defeat_transition_elapsed = min(
@@ -2238,6 +2601,16 @@ class ExorcismGame:
             self._draw_boss_return_transition()
         elif self.state == "boss_epilogue_transition":
             self._draw_boss_epilogue_transition()
+        elif self.state == "luciel_ending_transition":
+            self._draw_playing()
+            progress = min(
+                1.0,
+                self.boss_epilogue_elapsed / self.boss_epilogue_duration,
+            )
+            eased = progress * progress * (3.0 - 2.0 * progress)
+            overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            overlay.fill((0, 0, 0, round(255 * eased)))
+            self.screen.blit(overlay, (0, 0))
         elif self.state == "weaver_epilogue_transition":
             self._draw_weaver_epilogue_transition()
         elif self.state == "weaver_epilogue_video":
@@ -2248,6 +2621,21 @@ class ExorcismGame:
             self._draw_weaver_purify_transition()
         elif self.state == "stage_three_video":
             self._draw_stage_three_video()
+        elif self.state == "luciel_ending_video":
+            self._draw_stage_three_video()
+        elif self.state == "ending_scene":
+            if self.ending_background is not None:
+                self.screen.blit(self.ending_background, (0, 0))
+            else:
+                self.screen.fill((0, 0, 0))
+            progress = min(
+                1.0,
+                self.ending_scene_elapsed / self.ending_scene_fade_duration,
+            )
+            eased = progress * progress * (3.0 - 2.0 * progress)
+            overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            overlay.fill((0, 0, 0, round(255 * (1.0 - eased))))
+            self.screen.blit(overlay, (0, 0))
         elif self.state == "stage_three_transition":
             self._draw_stage_three_transition()
         elif self.state == "defeat_transition":
@@ -2608,7 +2996,13 @@ class ExorcismGame:
             border_top_left_radius=18,
             border_bottom_left_radius=18,
         )
-        speaker = self.font_small.render("PETER", True, GOLD)
+        speaker_name = (
+            self.story_dialogue_speakers[self.story_dialogue_index]
+            if self.story_dialogue_index < len(self.story_dialogue_speakers)
+            else "PETER"
+        )
+        speaker_color = (196, 212, 255) if speaker_name == "LUCIEL" else GOLD
+        speaker = self.font_small.render(speaker_name, True, speaker_color)
         speaker.set_alpha(panel_alpha)
         panel.blit(speaker, (34, 19))
         pygame.draw.line(
@@ -3149,6 +3543,7 @@ class ExorcismGame:
         progress = boss.arcane_charge_progress
         eased = progress * progress * (3.0 - 2.0 * progress)
         layer = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        magic_position = (PLAYER_POSITION[0], PLAYER_POSITION[1] + 64)
         if self.dark_magic_image is not None:
             scale = 0.62 + eased * 0.44
             image = pygame.transform.smoothscale(
@@ -3159,12 +3554,12 @@ class ExorcismGame:
                 ),
             )
             image.set_alpha(round(boss.alpha * min(1.0, 0.22 + eased * 0.72)))
-            layer.blit(image, image.get_rect(center=PLAYER_POSITION))
+            layer.blit(image, image.get_rect(center=magic_position))
         else:
             pygame.draw.circle(
                 layer,
                 (74, 34, 112, round(boss.alpha * (0.18 + eased * 0.52))),
-                PLAYER_POSITION,
+                magic_position,
                 round(80 + eased * 115),
             )
         self.screen.blit(layer, (0, 0))
@@ -3209,10 +3604,6 @@ class ExorcismGame:
         x = round(boss.x)
         y = round(boss.y + math.sin(boss.pulse * 1.6) * 4)
         self._draw_weaver_web_lanes(boss, alpha)
-        aura = pygame.Surface((250, 250), pygame.SRCALPHA)
-        pygame.draw.circle(aura, (96, 86, 150, alpha // 5), (125, 125), 118)
-        pygame.draw.circle(aura, (205, 195, 255, alpha // 2), (125, 125), 100, 3)
-        self.screen.blit(aura, aura.get_rect(center=(x, y)))
         state = (
             "defeated"
             if boss.defeated
@@ -3225,8 +3616,6 @@ class ExorcismGame:
             image = source_image.copy()
             image.set_alpha(alpha)
             self.screen.blit(image, image.get_rect(center=(x, y)))
-        else:
-            pygame.draw.circle(self.screen, (76, 70, 125), (x, y), boss.radius)
         name = self.font.render(
             f"WEAVER  WEB {boss.row_number}/4",
             True,
@@ -3244,22 +3633,10 @@ class ExorcismGame:
         y = round(boss.y + math.sin(boss.pulse * 1.8) * 5)
         if boss.arcane_charging:
             self._draw_luciel_arcane_charge(boss, alpha)
-        aura = pygame.Surface((270, 270), pygame.SRCALPHA)
-        charge = boss.arcane_charge_progress if boss.arcane_charging else 0.0
-        pygame.draw.circle(aura, (90, 130, 220, alpha // 5), (135, 135), 126)
-        pygame.draw.circle(
-            aura,
-            (245, 235, 255, min(255, alpha // 2 + round(charge * 90))),
-            (135, 135),
-            104 + round(charge * 12),
-            3,
-        )
-        self.screen.blit(aura, aura.get_rect(center=(x, y)))
         state = (
-            "defeated"
-            if boss.defeated
-            else "attacked"
-            if boss.is_hit_reacting or boss.knockback_active or boss.arcane_charging
+            "attacked"
+            if not boss.defeated
+            and (boss.is_hit_reacting or boss.knockback_active or boss.arcane_charging)
             else "idle"
         )
         source_image = self.luciel_images.get(state)
@@ -3267,11 +3644,8 @@ class ExorcismGame:
             image = source_image.copy()
             image.set_alpha(alpha)
             self.screen.blit(image, image.get_rect(center=(x, y)))
-        else:
-            pygame.draw.circle(self.screen, (82, 92, 158), (x, y), boss.radius)
-            pygame.draw.circle(self.screen, (225, 220, 255), (x, y), boss.radius, 3)
         name = self.font.render(
-            f"LUCIEL  SPELL {boss.row_number}/4",
+            f"LUCIEL  ROW {boss.row_number}/4",
             True,
             (232, 226, 255),
         )
@@ -3907,13 +4281,6 @@ class ExorcismGame:
     def _display_pattern_for_ghost(
         self, ghost: Ghost, pattern: object, crease_axis: str
     ) -> object:
-        if (
-            ghost.kind is GhostKind.CREASE
-            and crease_axis
-            and pattern
-            and not isinstance(pattern[0], tuple)
-        ):
-            return mirrored_pattern(pattern, crease_axis)
         return pattern
 
     def _crease_axis_for_pattern(self, ghost: Ghost, pattern: object) -> str:
@@ -4050,13 +4417,24 @@ class ExorcismGame:
         return gray
 
     def _draw_spell_bookmark(self) -> None:
+        spell_seal_alert = (
+            self.session.boss is not None
+            and self.session.boss_battle
+            and any(
+                self.session.boss.is_spell_sealed(spell.spell_type)
+                for spell in SpellManager.SPELLS
+            )
+        )
+        tab_color = (
+            (126, 38, 55)
+            if spell_seal_alert
+            else (65, 56, 105)
+        )
         tab = pygame.Surface(self.spell_tab_rect.size, pygame.SRCALPHA)
         pygame.draw.rect(
             tab,
             (
-                65,
-                56,
-                105,
+                *tab_color,
                 round(185 + 40 * self.spell_panel_progress),
             ),
             tab.get_rect(),
@@ -4071,9 +4449,24 @@ class ExorcismGame:
 
         panel_rect = self._spell_panel_rect()
         panel = pygame.Surface(panel_rect.size, pygame.SRCALPHA)
-        pygame.draw.rect(panel, (*PANEL, 112), panel.get_rect(), border_radius=14)
+        panel_color = (72, 19, 31) if spell_seal_alert else PANEL
+        panel_border = (
+            (218, 72, 92, 210)
+            if spell_seal_alert
+            else (94, 80, 136, 175)
+        )
         pygame.draw.rect(
-            panel, (94, 80, 136, 175), panel.get_rect(), 2, border_radius=14
+            panel,
+            (*panel_color, 145 if spell_seal_alert else 112),
+            panel.get_rect(),
+            border_radius=14,
+        )
+        pygame.draw.rect(
+            panel,
+            panel_border,
+            panel.get_rect(),
+            2,
+            border_radius=14,
         )
         self.screen.blit(panel, panel_rect)
         for index, spell in enumerate(SpellManager.SPELLS):
@@ -4094,12 +4487,23 @@ class ExorcismGame:
             )
             title = self.font.render(spell.name, True, spell_color)
             self.screen.blit(title, (panel_rect.x + 18, row_y))
-            detail = self.font_small.render(
+            detail_lines = self._wrap_spell_description(
                 f"{spell.description} / {spell.cost}",
-                True,
-                spell_color,
+                180,
             )
-            self.screen.blit(detail, (panel_rect.x + 18, row_y + 30))
+            for line_index, line in enumerate(detail_lines):
+                detail = self.spell_description_font.render(
+                    line,
+                    True,
+                    spell_color,
+                )
+                self.screen.blit(
+                    detail,
+                    (
+                        panel_rect.x + 18,
+                        row_y + 32 + line_index * 18,
+                    ),
+                )
             profile_rect = pygame.Rect(panel_rect.x + 208, row_y + 8, 70, 70)
             self._draw_spell_profile(spell, profile_rect, spell_color)
             self._draw_spell_cooldown_gauge(
@@ -4119,6 +4523,27 @@ class ExorcismGame:
                         center=(panel_rect.x + 245, row_y + 79)
                     ),
                 )
+
+    def _wrap_spell_description(
+        self,
+        text: str,
+        max_width: int,
+    ) -> list[str]:
+        lines: list[str] = []
+        current = ""
+        for word in text.split():
+            candidate = f"{current} {word}".strip()
+            if (
+                current
+                and self.spell_description_font.size(candidate)[0] > max_width
+            ):
+                lines.append(current)
+                current = word
+            else:
+                current = candidate
+        if current:
+            lines.append(current)
+        return lines[:2]
 
     def _draw_spell_profile(
         self,
