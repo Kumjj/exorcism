@@ -13,6 +13,8 @@ except ModuleNotFoundError:
     print("pygame is required. Install it with: python -m pip install pygame")
     raise SystemExit(1)
 
+from assets import AssetLoader
+from audio import AudioManager
 from core import (
     GameSession,
     Ghost,
@@ -59,18 +61,6 @@ PINK = (255, 105, 180)
 RED = (255, 91, 112)
 GREEN = (99, 230, 164)
 PATTERN_COLOR = (222, 231, 240)
-BGM_VOLUME_SCALE = 0.45
-BGM_TRACKS: dict[str, tuple[str, ...]] = {
-    "title": ("title_bgm.mp3",),
-    "gameover": ("Game_over_bgm.mp3",),
-    "stage1": ("Pition_bgm.mp3",),
-    "stage2": ("Weaver_bgm.mp3",),
-    "stage3": ("Veil of Lucien.mp3",),
-    "boss1": ("Pition_bgm.mp3",),
-    "boss2": ("Weaver_bgm.mp3",),
-    "final_boss": ("Veil of Lucien.mp3",),
-    "ending": ("ending_bgm.mp3",),
-}
 
 
 class Button:
@@ -193,12 +183,12 @@ class VideoPlayer:
 class ExorcismGame:
     def __init__(self) -> None:
         pygame.init()
-        pygame.mixer.set_num_channels(24)
-        pygame.mixer.set_reserved(1)
         pygame.display.set_caption("Exocism")
         self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
         self.clock = pygame.time.Clock()
-        korean_font_path = self._korean_font_path()
+        self.assets = AssetLoader((WIDTH, HEIGHT))
+        self.audio = AudioManager(self.assets)
+        korean_font_path = self.assets.korean_font_path()
         self.font_small = pygame.font.Font(korean_font_path, 21)
         self.spell_description_font = pygame.font.Font(korean_font_path, 15)
         self.font = pygame.font.Font(korean_font_path, 28)
@@ -207,17 +197,13 @@ class ExorcismGame:
         self.dialogue_font = pygame.font.Font(korean_font_path, 28)
         self.state = "menu"
         self.running = True
-        self.menu_background = self._load_cover_image("main.png")
+        self.menu_background = self.assets.load_cover_image("main.png")
         self.menu_reveal_elapsed = 0.0
         self.menu_reveal_duration = 1.0
         self.screen_transition_target: str | None = None
         self.screen_transition_elapsed = 0.0
         self.screen_transition_duration = 0.9
         self.screen_transition_switched = False
-        self.bgm_volume = 1.0
-        self.sfx_volume = 1.0
-        self.current_bgm_key: str | None = None
-        self.current_bgm_path: Path | None = None
         self.active_slider: str | None = None
         self.session = GameSession(rng=random.Random())
         self.pattern_input = PatternInput()
@@ -242,69 +228,69 @@ class ExorcismGame:
         self.spell_panel_close_delay = 0.12
         self.spell_panel_hover_grace = 0.0
         self.reward_orbs: list[dict[str, object]] = []
-        self.player_images = self._load_player_images()
-        self.player_attack_image = self._load_scaled_image(
+        self.player_images = self.assets.load_player_images()
+        self.player_attack_image = self.assets.load_scaled_image(
             "peter_attack1.png",
             145,
         )
         self.player_attack_timer = 0.0
         self.player_attack_duration = 0.65
-        self.ghost_images = self._load_ghost_images()
+        self.ghost_images = self.assets.load_ghost_images()
         self.piton_images = {
-            state: self._load_scaled_image(f"piton_{state}.png", 176)
+            state: self.assets.load_scaled_image(f"piton_{state}.png", 176)
             for state in ("idle", "attacked", "defeated")
         }
         self.weaver_images = {
-            state: self._load_scaled_image(f"weaver_{state}.png", 190)
+            state: self.assets.load_scaled_image(f"weaver_{state}.png", 190)
             for state in ("idle", "attacked", "defeated")
         }
         self.luciel_images = {
-            state: self._load_scaled_image(f"luciel_{state}.png", 198)
+            state: self.assets.load_scaled_image(f"luciel_{state}.png", 198)
             for state in ("idle", "attacked", "defeated")
         }
-        luciel_image = self._load_scaled_image("Luciel.png", 214)
+        luciel_image = self.assets.load_scaled_image("Luciel.png", 214)
         if luciel_image is None:
-            luciel_image = self._load_scaled_image("The_Vail(Luciel).png", 214)
+            luciel_image = self.assets.load_scaled_image("The_Vail(Luciel).png", 214)
         if luciel_image is not None:
             self.luciel_images = {
                 state: luciel_image
                 for state in ("idle", "attacked", "defeated")
             }
-        self.weaver_web_image = self._load_scaled_image("weaver_web.png", 220)
-        self.dark_magic_image = self._load_scaled_image("dark_magic.png", 250)
-        self.health_image = self._load_scaled_image("peter_health.png", 68)
+        self.weaver_web_image = self.assets.load_scaled_image("weaver_web.png", 220)
+        self.dark_magic_image = self.assets.load_scaled_image("dark_magic.png", 250)
+        self.health_image = self.assets.load_scaled_image("peter_health.png", 68)
         self.health_lost_image = (
-            self._grayscale_surface(self.health_image)
+            self.assets.grayscale_surface(self.health_image)
             if self.health_image is not None
             else None
         )
         self.spell_images = {
-            SpellType.HEAL: self._load_scaled_image("rejuvenation_spell.png", 78),
-            SpellType.REPEL: self._load_scaled_image("warding_spell.png", 78),
-            SpellType.NULLIFY: self._load_scaled_image("purification spell.png", 78),
-            SpellType.TRUTH: self._load_scaled_image("revelation_spell.png", 78),
+            SpellType.HEAL: self.assets.load_scaled_image("rejuvenation_spell.png", 78),
+            SpellType.REPEL: self.assets.load_scaled_image("warding_spell.png", 78),
+            SpellType.NULLIFY: self.assets.load_scaled_image("purification spell.png", 78),
+            SpellType.TRUTH: self.assets.load_scaled_image("revelation_spell.png", 78),
         }
-        self.defeat_background = self._load_cover_image(
+        self.defeat_background = self.assets.load_cover_image(
             "peter_defeat_scene.png"
         )
-        self.ending_background = self._load_cover_image("ending_scene.png")
+        self.ending_background = self.assets.load_cover_image("ending_scene.png")
         self.stage_backgrounds = {
-            1: self._load_cover_image("stage1.png"),
-            2: self._load_cover_image("stage2.png"),
+            1: self.assets.load_cover_image("stage1.png"),
+            2: self.assets.load_cover_image("stage2.png"),
         }
-        self.field_background = self._load_cover_image("field.png")
+        self.field_background = self.assets.load_cover_image("field.png")
         self.stage_one_cards = [
-            self._load_scaled_image("card_(fixed).png", 238),
-            self._load_scaled_image("card_(trap).png", 238),
-            self._load_scaled_image("card_(seal).png", 238),
+            self.assets.load_scaled_image("card_(fixed).png", 238),
+            self.assets.load_scaled_image("card_(trap).png", 238),
+            self.assets.load_scaled_image("card_(seal).png", 238),
         ]
         self.stage_two_cards = [
-            self._load_scaled_image("card_(ambush).png", 238),
-            self._load_scaled_image("card_(layered).png", 238),
-            self._load_scaled_image("card_(reversed).png", 238),
+            self.assets.load_scaled_image("card_(ambush).png", 238),
+            self.assets.load_scaled_image("card_(layered).png", 238),
+            self.assets.load_scaled_image("card_(reversed).png", 238),
         ]
         self.story_background: pygame.Surface | None = None
-        self.boss_epilogue_background = self._load_cover_image("scene2.png")
+        self.boss_epilogue_background = self.assets.load_cover_image("scene2.png")
         self.pending_shift_pattern: tuple[int, ...] = ()
         self.input_shift_layer = False
         self.input_shift_cancelled = False
@@ -350,23 +336,7 @@ class ExorcismGame:
             Path(__file__).with_name("exorcism_sceen1.mp4"),
             (WIDTH, HEIGHT),
         )
-        self.tutorial_video_sound = self._load_tutorial_video_sound(
-            Path(__file__).with_name("exorcism_sceen1.mp4")
-        )
-        self.tutorial_video_channel: pygame.mixer.Channel | None = None
-        self.intro_atmosphere_sound = self._load_audio_sound(
-            Path(__file__).with_name("intro_atmosphere.mp3"),
-            start_seconds=8.0,
-        )
-        self.intro_atmosphere_channel: pygame.mixer.Channel | None = None
-        self.magic_spell_sound = self._load_audio_sound(
-            Path(__file__).with_name("magic_spell.mp3"),
-            volume_gain=1.0,
-        )
-        self.magic_spell_channel = pygame.mixer.Channel(0)
         self.story_video: VideoPlayer | None = None
-        self.story_video_sound: pygame.mixer.Sound | None = None
-        self.story_video_channel: pygame.mixer.Channel | None = None
         self.intro_story_dialogue_lines = (
             "...기운이 깊다. 이곳인가.",
             "의뢰인은 이 저택에서 사라진 가족의 목소리를 들었다고 했지.",
@@ -400,21 +370,11 @@ class ExorcismGame:
         self.boss_transition_elapsed = 0.0
         self.boss_transition_duration = 1.5
         self.boss_video: VideoPlayer | None = None
-        self.boss_video_sound = self._load_tutorial_video_sound(
-            Path(__file__).with_name("exorcism3.mp4")
-        )
-        self.boss_video_channel: pygame.mixer.Channel | None = None
         self.stage_end_video: VideoPlayer | None = None
-        self.stage_end_video_sound: pygame.mixer.Sound | None = None
-        self.stage_end_video_channel: pygame.mixer.Channel | None = None
         self.stage_end_transition_elapsed = 0.0
         self.stage_end_transition_duration = 1.2
         self.weaver_epilogue_video: VideoPlayer | None = None
-        self.weaver_epilogue_video_sound: pygame.mixer.Sound | None = None
-        self.weaver_epilogue_video_channel: pygame.mixer.Channel | None = None
         self.stage_three_video: VideoPlayer | None = None
-        self.stage_three_video_sound: pygame.mixer.Sound | None = None
-        self.stage_three_video_channel: pygame.mixer.Channel | None = None
         self.stage_three_video_number = 7
         self.boss_support_timer = 4.5
         self.luciel_orbit_spawn_timer = 0.0
@@ -433,146 +393,7 @@ class ExorcismGame:
         self.ending_scene_fade_duration = 2.0
         self.retry_stage = 1
         self.stage_checkpoint_score = 0
-        self.peter_speak_sound = self._load_sound("peter_speak.wav")
-        if self.peter_speak_sound is not None:
-            self.peter_speak_sound.set_volume(0.42)
-        self.luciel_speak_sound = self._load_sound("luciel_speak.wav")
-        if self.luciel_speak_sound is not None:
-            self.luciel_speak_sound.set_volume(0.42)
-        self.boo_sounds = [
-            sound
-            for filename in ("boo1.mp3", "boo2.mp3", "boo3.mp3")
-            if (sound := self._load_sound(filename)) is not None
-        ]
-        for sound in self.boo_sounds:
-            sound.set_volume(0.72)
-        self.ghost_defeated_sound = self._load_sound("ghost_defeated.mp3")
-        if self.ghost_defeated_sound is not None:
-            self.ghost_defeated_sound.set_volume(0.85)
-        self.attacked_sound = self._load_sound("attacked.mp3")
-        self.piton_attack_sound = self._load_sound("piton_attack.mp3")
-        self.piton_death_sound = self._load_sound("piton_death.mp3")
-        self.weaver_attack_sound = self._load_sound("weaver_attack.mp3")
-        self.weaver_death_sound = self._load_sound("weaver_death.mp3")
-        self.weaver_web_sound = self._load_sound("weaver_web.mp3")
-        self.luciel_disappear_sound = self._load_sound("luciel_disappear.mp3")
-        self.luciel_magic_attack_sound = self._load_sound(
-            "luciel_magic_attack.mp3"
-        )
-        self.combat_event_sounds = tuple(
-            sound
-            for sound in (
-                self.attacked_sound,
-                self.piton_attack_sound,
-                self.piton_death_sound,
-                self.weaver_attack_sound,
-                self.weaver_death_sound,
-                self.weaver_web_sound,
-                self.luciel_disappear_sound,
-                self.luciel_magic_attack_sound,
-            )
-            if sound is not None
-        )
-        self.ghost_boo_channels: dict[int, pygame.mixer.Channel] = {}
-        self._apply_audio_settings()
         self._sync_bgm_to_state()
-
-    def _korean_font_path(self) -> str | None:
-        candidates = (
-            Path(__file__).with_name("NotoSansKR-VF.ttf"),
-            Path(__file__).with_name("malgun.ttf"),
-            Path("/mnt/c/Windows/Fonts/NotoSansKR-VF.ttf"),
-            Path("/mnt/c/Windows/Fonts/malgun.ttf"),
-            Path("/mnt/c/Windows/Fonts/gulim.ttc"),
-            Path("/mnt/c/Windows/Fonts/GOTHIC.TTF"),
-        )
-        for path in candidates:
-            if path.exists():
-                return str(path)
-        return (
-            pygame.font.match_font("malgungothic")
-            or pygame.font.match_font("nanumgothic")
-            or pygame.font.match_font("notosanscjkkr")
-        )
-
-    def _load_sound(self, filename: str) -> pygame.mixer.Sound | None:
-        sound_path = Path(__file__).with_name(filename)
-        if not sound_path.exists():
-            return None
-        try:
-            return pygame.mixer.Sound(str(sound_path))
-        except pygame.error:
-            return None
-
-    def _load_tutorial_video_sound(
-        self, video_path: Path
-    ) -> pygame.mixer.Sound | None:
-        return self._load_audio_sound(video_path)
-
-    def _load_audio_sound(
-        self,
-        audio_path: Path,
-        volume_gain: float = 1.0,
-        start_seconds: float = 0.0,
-    ) -> pygame.mixer.Sound | None:
-        ffmpeg = shutil.which("ffmpeg")
-        if ffmpeg is None or not audio_path.exists():
-            return None
-        command = [
-            ffmpeg,
-            "-loglevel",
-            "error",
-        ]
-        if start_seconds > 0.0:
-            command.extend(["-ss", str(start_seconds)])
-        command.extend([
-            "-i",
-            str(audio_path),
-            "-vn",
-        ])
-        if volume_gain != 1.0:
-            command.extend(["-af", f"volume={volume_gain}"])
-        command.extend([
-            "-f",
-            "s16le",
-            "-acodec",
-            "pcm_s16le",
-            "-ar",
-            "44100",
-            "-ac",
-            "2",
-            "-",
-        ])
-        startup_info = None
-        creation_flags = 0
-        if hasattr(subprocess, "STARTUPINFO"):
-            startup_info = subprocess.STARTUPINFO()
-            startup_info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        try:
-            result = subprocess.run(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                check=True,
-                startupinfo=startup_info,
-                creationflags=creation_flags,
-            )
-            return pygame.mixer.Sound(buffer=result.stdout)
-        except (OSError, subprocess.CalledProcessError, pygame.error):
-            return None
-
-    def _stop_bgm(self) -> None:
-        pygame.mixer.music.stop()
-        self.current_bgm_key = None
-        self.current_bgm_path = None
-
-    def _bgm_path_for_key(self, key: str) -> Path | None:
-        for filename in BGM_TRACKS.get(key, ()):
-            path = Path(__file__).with_name(filename)
-            if path.exists():
-                return path
-        return None
 
     def _desired_bgm_key(self) -> str | None:
         if self.state in ("menu", "settings"):
@@ -644,28 +465,7 @@ class ExorcismGame:
         return None
 
     def _sync_bgm_to_state(self) -> None:
-        desired_key = self._desired_bgm_key()
-        if desired_key is None:
-            if self.current_bgm_key is not None:
-                self._stop_bgm()
-            return
-        path = self._bgm_path_for_key(desired_key)
-        if path is None:
-            if self.current_bgm_key is not None:
-                self._stop_bgm()
-            return
-        if self.current_bgm_key == desired_key and self.current_bgm_path == path:
-            return
-        try:
-            pygame.mixer.music.load(str(path))
-            pygame.mixer.music.set_volume(BGM_VOLUME_SCALE * self.bgm_volume)
-            pygame.mixer.music.play(loops=-1)
-        except pygame.error:
-            self.current_bgm_key = None
-            self.current_bgm_path = None
-            return
-        self.current_bgm_key = desired_key
-        self.current_bgm_path = path
+        self.audio.set_bgm(self._desired_bgm_key())
 
     def _begin_tutorial(self) -> None:
         self.tutorial_video.close()
@@ -676,103 +476,10 @@ class ExorcismGame:
         self.tutorial_success_active = False
         self.pattern_input.clear()
         self.state = "tutorial"
-        if self.tutorial_video_sound is not None:
-            self.tutorial_video_channel = self.tutorial_video_sound.play()
-        if (
-            self.intro_atmosphere_sound is not None
-            and self.intro_atmosphere_channel is None
-        ):
-            self.intro_atmosphere_channel = self.intro_atmosphere_sound.play(
-                loops=-1
-            )
+        self.audio.replay_video("tutorial")
+        self.audio.start_intro_atmosphere()
         self.tutorial_video.sync_start()
-        self._apply_audio_settings()
-
-    def _apply_audio_settings(self) -> None:
-        pygame.mixer.music.set_volume(BGM_VOLUME_SCALE * self.bgm_volume)
-        if self.tutorial_video_channel is not None:
-            self.tutorial_video_channel.set_volume(self.sfx_volume)
-        if self.intro_atmosphere_channel is not None:
-            self.intro_atmosphere_channel.set_volume(0.12 * self.bgm_volume)
-        if self.story_video_channel is not None:
-            self.story_video_channel.set_volume(0.72 * self.sfx_volume)
-        if self.boss_video_channel is not None:
-            self.boss_video_channel.set_volume(0.78 * self.sfx_volume)
-        if self.stage_end_video_channel is not None:
-            self.stage_end_video_channel.set_volume(0.95 * self.sfx_volume)
-        if self.weaver_epilogue_video_channel is not None:
-            self.weaver_epilogue_video_channel.set_volume(0.95 * self.sfx_volume)
-        if self.stage_three_video_channel is not None:
-            self.stage_three_video_channel.set_volume(0.95 * self.sfx_volume)
-        if self.peter_speak_sound is not None:
-            self.peter_speak_sound.set_volume(0.42 * self.sfx_volume)
-        if self.luciel_speak_sound is not None:
-            self.luciel_speak_sound.set_volume(0.42 * self.sfx_volume)
-        for sound in self.boo_sounds:
-            sound.set_volume(0.72 * self.sfx_volume)
-        if self.ghost_defeated_sound is not None:
-            self.ghost_defeated_sound.set_volume(0.85 * self.sfx_volume)
-        if self.magic_spell_sound is not None:
-            self.magic_spell_sound.set_volume(self.sfx_volume)
-        for sound in self.combat_event_sounds:
-            sound.set_volume(0.82 * self.sfx_volume)
-
-    def _load_player_images(self) -> list[pygame.Surface]:
-        frames = [
-            image
-            for index in range(1, 4)
-            if (image := self._load_scaled_image(f"peter_idle{index}.png", 145))
-            is not None
-        ]
-        fallback = self._load_scaled_image("exorcism_MC.png", 145)
-        return frames or ([fallback] if fallback is not None else [])
-
-    def _load_scaled_image(self, filename: str, width: int) -> pygame.Surface | None:
-        image_path = Path(__file__).with_name(filename)
-        if not image_path.exists():
-            return None
-        image = pygame.image.load(image_path).convert_alpha()
-        height = round(image.get_height() * width / image.get_width())
-        return pygame.transform.smoothscale(image, (width, height))
-
-    def _load_cover_image(self, filename: str) -> pygame.Surface | None:
-        image_path = Path(__file__).with_name(filename)
-        if not image_path.exists():
-            return None
-        image = pygame.image.load(image_path).convert()
-        scale = max(WIDTH / image.get_width(), HEIGHT / image.get_height())
-        size = (
-            round(image.get_width() * scale),
-            round(image.get_height() * scale),
-        )
-        scaled = pygame.transform.smoothscale(image, size)
-        source = pygame.Rect(
-            (scaled.get_width() - WIDTH) // 2,
-            (scaled.get_height() - HEIGHT) // 2,
-            WIDTH,
-            HEIGHT,
-        )
-        return scaled.subsurface(source).copy()
-
-    def _load_ghost_images(self) -> dict[object, dict[str, pygame.Surface]]:
-        images: dict[object, dict[str, pygame.Surface]] = {}
-        for variant in (1, 2):
-            variant_images: dict[str, pygame.Surface] = {}
-            for state in ("idle", "attacked", "defeated"):
-                image = self._load_scaled_image(f"slow{variant}_{state}.png", 96)
-                if image is not None:
-                    variant_images[state] = image
-            if variant_images:
-                images[variant] = variant_images
-        for name in ("creep", "crease", "snarl"):
-            variant_images = {}
-            for state in ("idle", "attacked", "defeated"):
-                image = self._load_scaled_image(f"{name}_{state}.png", 96)
-                if image is not None:
-                    variant_images[state] = image
-            if variant_images:
-                images[name] = variant_images
-        return images
+        self.audio.apply_settings()
 
     def _make_grid_positions(self) -> list[tuple[int, int]]:
         return self._make_grid_positions_at(GRID_CENTER, GRID_GAP)
@@ -812,28 +519,12 @@ class ExorcismGame:
             self.weaver_epilogue_video.close()
         if self.stage_three_video is not None:
             self.stage_three_video.close()
-        if self.tutorial_video_channel is not None:
-            self.tutorial_video_channel.stop()
-        self._stop_intro_atmosphere()
-        if self.story_video_channel is not None:
-            self.story_video_channel.stop()
-        if self.boss_video_channel is not None:
-            self.boss_video_channel.stop()
-        if self.stage_end_video_channel is not None:
-            self.stage_end_video_channel.stop()
-        if self.weaver_epilogue_video_channel is not None:
-            self.weaver_epilogue_video_channel.stop()
-        if self.stage_three_video_channel is not None:
-            self.stage_three_video_channel.stop()
-        pygame.mixer.music.stop()
-        if self.magic_spell_channel is not None:
-            self.magic_spell_channel.stop()
-        self._stop_all_ghost_boo()
+        self.audio.shutdown()
         pygame.quit()
 
     def _start_game(self) -> None:
-        self._stop_all_ghost_boo()
-        self._stop_intro_atmosphere()
+        self.audio.stop_all_ghost_boo()
+        self.audio.stop_intro_atmosphere()
         self.session.reset()
         self.retry_stage = 1
         self.stage_checkpoint_score = 0
@@ -858,11 +549,6 @@ class ExorcismGame:
         self.spawn_timer = self.grid_intro_duration + 0.25
         self.message_timer = 0.0
         self._begin_stage_intro(1)
-
-    def _stop_intro_atmosphere(self) -> None:
-        if self.intro_atmosphere_channel is not None:
-            self.intro_atmosphere_channel.stop()
-            self.intro_atmosphere_channel = None
 
     def _begin_stage_intro(self, stage: int) -> None:
         self.stage_intro_pending = True
@@ -976,10 +662,9 @@ class ExorcismGame:
         )
         value = max(0.0, min(1.0, (mouse_x - rect.left) / rect.width))
         if self.active_slider == "bgm":
-            self.bgm_volume = value
+            self.audio.set_bgm_volume(value)
         else:
-            self.sfx_volume = value
-        self._apply_audio_settings()
+            self.audio.set_sfx_volume(value)
 
     def _start_screen_transition(self, target: str) -> None:
         if self.screen_transition_target is not None:
@@ -1062,7 +747,7 @@ class ExorcismGame:
                 self.stage_intro_success_active = True
                 self.stage_intro_success_elapsed = 0.0
                 self.pattern_input.clear()
-                self._play_magic_spell_sound()
+                self.audio.play_magic_spell()
 
     def _start_tutorial_success(self) -> None:
         if self.tutorial_success_active:
@@ -1070,14 +755,11 @@ class ExorcismGame:
         self.tutorial_success_active = True
         self.tutorial_success_elapsed = 0.0
         self.pattern_input.clear()
-        self._play_magic_spell_sound()
+        self.audio.play_magic_spell()
 
     def _finish_tutorial(self) -> None:
-        if self.tutorial_video_channel is not None:
-            self.tutorial_video_channel.stop()
-            self.tutorial_video_channel = None
-        if self.magic_spell_channel is not None:
-            self.magic_spell_channel.stop()
+        self.audio.stop_video("tutorial")
+        self.audio.stop_magic_spell()
         self.tutorial_video.close()
         self._start_story_scene()
 
@@ -1104,12 +786,10 @@ class ExorcismGame:
             (WIDTH, HEIGHT),
             duration=5.92,
         )
-        self.story_video_sound = self._load_tutorial_video_sound(story_path)
-        if self.story_video_sound is not None:
-            self.story_video_channel = self.story_video_sound.play()
+        self.audio.load_video("story", story_path)
         if self.story_video is not None:
             self.story_video.sync_start()
-        self._apply_audio_settings()
+        self.audio.apply_settings()
 
     def _handle_story_event(self, event: pygame.event.Event) -> None:
         if (
@@ -1139,9 +819,7 @@ class ExorcismGame:
         self.state = "story_transition"
         self.story_transition_elapsed = 0.0
         self.story_game_ready = False
-        if self.story_video_channel is not None:
-            self.story_video_channel.stop()
-            self.story_video_channel = None
+        self.audio.stop_video("story")
         if self.story_video is not None:
             self.story_video.close()
 
@@ -1159,19 +837,16 @@ class ExorcismGame:
         self.state = "boss_intro_transition"
         self.boss_transition_elapsed = 0.0
         self.pattern_input.clear()
-        self._stop_all_ghost_boo()
+        self.audio.stop_all_ghost_boo()
 
     def _start_stage_end_transition(self) -> None:
         self.state = "stage_end_transition"
         self.stage_end_transition_elapsed = 0.0
         self.pattern_input.clear()
-        self._stop_all_ghost_boo()
+        self.audio.stop_all_ghost_boo()
 
     def _start_stage_end_video(self) -> None:
         video_path = Path(__file__).with_name("exorcism5.mp4")
-        if self.stage_end_video_channel is not None:
-            self.stage_end_video_channel.stop()
-            self.stage_end_video_channel = None
         if self.stage_end_video is not None:
             self.stage_end_video.close()
         self.stage_end_video = VideoPlayer(
@@ -1179,14 +854,9 @@ class ExorcismGame:
             (WIDTH, HEIGHT),
             duration=6.478,
         )
-        self.stage_end_video_sound = self._load_audio_sound(
-            video_path,
-            volume_gain=1.55,
-        )
-        if self.stage_end_video_sound is not None:
-            self.stage_end_video_channel = self.stage_end_video_sound.play()
+        self.audio.load_video("stage_end", video_path, volume_gain=1.55)
         self.stage_end_video.sync_start()
-        self._apply_audio_settings()
+        self.audio.apply_settings()
         self.state = "stage_end_video"
 
     def _prepare_weaver_battle(self) -> None:
@@ -1195,29 +865,20 @@ class ExorcismGame:
         self.spawn_timer = self.grid_intro_duration + 0.25
         self.boss_support_timer = 1.2
         self.pattern_input.clear()
-        self._stop_all_ghost_boo()
+        self.audio.stop_all_ghost_boo()
 
     def _start_weaver_epilogue_video(self) -> None:
         video_path = Path(__file__).with_name("exorcism6.mp4")
-        if self.weaver_epilogue_video_channel is not None:
-            self.weaver_epilogue_video_channel.stop()
-            self.weaver_epilogue_video_channel = None
         if self.weaver_epilogue_video is not None:
             self.weaver_epilogue_video.close()
         self.weaver_epilogue_video = VideoPlayer(video_path, (WIDTH, HEIGHT))
-        self.weaver_epilogue_video_sound = self._load_audio_sound(video_path)
-        if self.weaver_epilogue_video_sound is not None:
-            self.weaver_epilogue_video_channel = (
-                self.weaver_epilogue_video_sound.play()
-            )
+        self.audio.load_video("weaver_epilogue", video_path)
         self.weaver_epilogue_video.sync_start()
-        self._apply_audio_settings()
+        self.audio.apply_settings()
         self.state = "weaver_epilogue_video"
 
     def _start_weaver_purify_prompt(self) -> None:
-        if self.weaver_epilogue_video_channel is not None:
-            self.weaver_epilogue_video_channel.stop()
-            self.weaver_epilogue_video_channel = None
+        self.audio.stop_video("weaver_epilogue")
         self.stage_intro_pattern = next(
             spell.pattern
             for spell in SpellManager.SPELLS
@@ -1256,27 +917,19 @@ class ExorcismGame:
             else None
         )
         self.story_video = None
-        self.story_video_sound = None
-        self.story_video_channel = None
+        self.audio.clear_video("story")
         self.state = "story"
 
     def _start_stage_three_video(self, video_number: int = 7) -> None:
         self.stage_three_video_number = video_number
         video_path = Path(__file__).with_name(f"exorcism{video_number}.mp4")
-        if self.weaver_epilogue_video_channel is not None:
-            self.weaver_epilogue_video_channel.stop()
-            self.weaver_epilogue_video_channel = None
-        if self.stage_three_video_channel is not None:
-            self.stage_three_video_channel.stop()
-            self.stage_three_video_channel = None
+        self.audio.stop_videos("weaver_epilogue", "stage_three")
         if self.stage_three_video is not None:
             self.stage_three_video.close()
         self.stage_three_video = VideoPlayer(video_path, (WIDTH, HEIGHT))
-        self.stage_three_video_sound = self._load_audio_sound(video_path)
-        if self.stage_three_video_sound is not None:
-            self.stage_three_video_channel = self.stage_three_video_sound.play()
+        self.audio.load_video("stage_three", video_path)
         self.stage_three_video.sync_start()
-        self._apply_audio_settings()
+        self.audio.apply_settings()
         self.state = "stage_three_video"
 
     def _start_luciel_intro_dialogue(self) -> None:
@@ -1311,16 +964,13 @@ class ExorcismGame:
             else None
         )
         self.story_video = None
-        self.story_video_sound = None
-        self.story_video_channel = None
+        self.audio.clear_video("story")
         self.state = "story"
 
     def _prepare_stage_three(self) -> None:
-        self._stop_all_ghost_boo()
-        self._stop_intro_atmosphere()
-        if self.stage_three_video_channel is not None:
-            self.stage_three_video_channel.stop()
-            self.stage_three_video_channel = None
+        self.audio.stop_all_ghost_boo()
+        self.audio.stop_intro_atmosphere()
+        self.audio.stop_video("stage_three")
         self.stage_checkpoint_score = self.session.score
         self.session.start_stage(3)
         self.session.start_luciel_battle(SPAWN_POSITIONS, PLAYER_POSITION)
@@ -1355,18 +1005,15 @@ class ExorcismGame:
             (WIDTH, HEIGHT),
             duration=6.04,
         )
-        if self.boss_video_sound is not None:
-            self.boss_video_channel = self.boss_video_sound.play()
+        self.audio.replay_video("boss")
         self.boss_video.sync_start()
-        self._apply_audio_settings()
+        self.audio.apply_settings()
         self.state = "boss_video"
 
     def _start_boss_return_transition(self) -> None:
         self.state = "boss_return_transition"
         self.boss_transition_elapsed = 0.0
-        if self.boss_video_channel is not None:
-            self.boss_video_channel.stop()
-            self.boss_video_channel = None
+        self.audio.stop_video("boss")
 
     def _prepare_boss_battle(self) -> None:
         if self.session.stage >= 3:
@@ -1378,13 +1025,8 @@ class ExorcismGame:
         self.boss_support_timer = 2.8
 
     def _skip_intro(self) -> None:
-        if self.tutorial_video_channel is not None:
-            self.tutorial_video_channel.stop()
-            self.tutorial_video_channel = None
-        if self.story_video_channel is not None:
-            self.story_video_channel.stop()
-            self.story_video_channel = None
-        self.magic_spell_channel.stop()
+        self.audio.stop_videos("tutorial", "story")
+        self.audio.stop_magic_spell()
         self.tutorial_video.close()
         if self.story_video is not None:
             self.story_video.close()
@@ -1446,9 +1088,7 @@ class ExorcismGame:
             self._prepare_stage_three()
 
     def _skip_to_stage_two_intro(self) -> None:
-        if self.story_video_channel is not None:
-            self.story_video_channel.stop()
-            self.story_video_channel = None
+        self.audio.stop_video("story")
         if self.story_video is not None:
             self.story_video.close()
             self.story_video = None
@@ -1460,9 +1100,7 @@ class ExorcismGame:
         self._prepare_stage_two()
 
     def _skip_to_boss_battle(self) -> None:
-        if self.boss_video_channel is not None:
-            self.boss_video_channel.stop()
-            self.boss_video_channel = None
+        self.audio.stop_video("boss")
         if self.boss_video is not None:
             self.boss_video.close()
         if self.session.boss is None:
@@ -1471,9 +1109,7 @@ class ExorcismGame:
         self.grid_intro_elapsed = 0.0
 
     def _skip_to_weaver_battle(self) -> None:
-        if self.stage_end_video_channel is not None:
-            self.stage_end_video_channel.stop()
-            self.stage_end_video_channel = None
+        self.audio.stop_video("stage_end")
         if self.stage_end_video is not None:
             self.stage_end_video.close()
         self._prepare_weaver_battle()
@@ -1482,19 +1118,8 @@ class ExorcismGame:
 
     def _skip_to_luciel_battle(self) -> None:
         self.screen_transition_target = None
-        for channel_name in (
-            "tutorial_video_channel",
-            "story_video_channel",
-            "boss_video_channel",
-            "stage_end_video_channel",
-            "weaver_epilogue_video_channel",
-            "stage_three_video_channel",
-        ):
-            channel = getattr(self, channel_name)
-            if channel is not None:
-                channel.stop()
-                setattr(self, channel_name, None)
-        self.magic_spell_channel.stop()
+        self.audio.stop_videos()
+        self.audio.stop_magic_spell()
         self.story_dialogue_active = False
         self.story_game_ready = False
         self.story_next_action = ""
@@ -1510,9 +1135,8 @@ class ExorcismGame:
         boss.knockback_active = False
         self.session.defeat_all_ghosts()
         self.session.boss_last_event = "defeated"
-        self._stop_all_ghost_boo()
-        if self.ghost_defeated_sound is not None:
-            self.ghost_defeated_sound.play()
+        self.audio.stop_all_ghost_boo()
+        self.audio.play_sfx("ghost_defeated")
         self.pattern_input.clear()
         self.last_drag_position = None
         self.pending_shift_pattern = ()
@@ -1521,8 +1145,8 @@ class ExorcismGame:
         self.state = "playing"
 
     def _prepare_stage_two(self) -> None:
-        self._stop_all_ghost_boo()
-        self._stop_intro_atmosphere()
+        self.audio.stop_all_ghost_boo()
+        self.audio.stop_intro_atmosphere()
         self.stage_checkpoint_score = self.session.score
         self.session.start_stage(2)
         self.pattern_input.clear()
@@ -1551,7 +1175,7 @@ class ExorcismGame:
         self.boss_epilogue_elapsed = 0.0
         self.boss_epilogue_scene_ready = False
         self.pattern_input.clear()
-        self._stop_all_ghost_boo()
+        self.audio.stop_all_ghost_boo()
         self.state = "boss_epilogue_transition"
 
     def _start_luciel_ending_transition(self) -> None:
@@ -1560,7 +1184,7 @@ class ExorcismGame:
         self.boss_epilogue_started = True
         self.boss_epilogue_elapsed = 0.0
         self.pattern_input.clear()
-        self._stop_all_ghost_boo()
+        self.audio.stop_all_ghost_boo()
         self.state = "luciel_ending_transition"
 
     def _start_luciel_ending_video(self) -> None:
@@ -1568,9 +1192,7 @@ class ExorcismGame:
         self.state = "luciel_ending_video"
 
     def _start_ending_scene(self) -> None:
-        if self.stage_three_video_channel is not None:
-            self.stage_three_video_channel.stop()
-            self.stage_three_video_channel = None
+        self.audio.stop_video("stage_three")
         self.ending_scene_elapsed = 0.0
         self.state = "ending_scene"
 
@@ -1581,7 +1203,7 @@ class ExorcismGame:
         self.boss_epilogue_elapsed = 0.0
         self.boss_epilogue_scene_ready = False
         self.pattern_input.clear()
-        self._stop_all_ghost_boo()
+        self.audio.stop_all_ghost_boo()
         self.state = "weaver_epilogue_transition"
 
     def _start_boss_epilogue_story(self) -> None:
@@ -1605,8 +1227,7 @@ class ExorcismGame:
         self.story_next_action = "stage_4_video"
         self.story_background = self.boss_epilogue_background
         self.story_video = None
-        self.story_video_sound = None
-        self.story_video_channel = None
+        self.audio.clear_video("story")
         self.state = "story"
 
     def _start_stage_four_video(self) -> None:
@@ -1631,11 +1252,9 @@ class ExorcismGame:
             (WIDTH, HEIGHT),
             duration=4.667,
         )
-        self.story_video_sound = self._load_tutorial_video_sound(video_path)
-        if self.story_video_sound is not None:
-            self.story_video_channel = self.story_video_sound.play()
+        self.audio.load_video("story", video_path)
         self.story_video.sync_start()
-        self._apply_audio_settings()
+        self.audio.apply_settings()
         self.state = "story"
 
     def _start_defeat_transition(self) -> None:
@@ -1646,7 +1265,7 @@ class ExorcismGame:
         self.defeat_transition_elapsed = 0.0
         self.defeat_scene_ready = False
         self.pattern_input.clear()
-        self._stop_all_ghost_boo()
+        self.audio.stop_all_ghost_boo()
 
     def _retry_from_gameover(self) -> None:
         self._restart_current_stage(self.retry_stage)
@@ -1739,25 +1358,24 @@ class ExorcismGame:
         result = self.session.judge_pattern(pattern)
         if self.session.boss_last_event == "defeated":
             if isinstance(boss, WeaverBoss):
-                if self.weaver_death_sound is not None:
-                    self.weaver_death_sound.play()
+                self.audio.play_sfx("weaver_death")
             elif isinstance(boss, LucielBoss):
                 boss.fade_remaining = boss.fade_duration
                 self._start_luciel_ending_transition()
-            elif self.piton_death_sound is not None:
-                self.piton_death_sound.play()
+            else:
+                self.audio.play_sfx("piton_death")
         defeated_ghosts = [
             ghost
             for ghost in self.session.ghosts
             if ghost.vanishing and id(ghost) not in previously_vanishing
         ]
         for ghost in defeated_ghosts:
-            self._play_ghost_defeated_sound(ghost)
+            self.audio.play_ghost_defeated(ghost)
         if self.session.last_match_count or self.session.last_spell_cast:
             self.success_pattern = pattern if pattern and isinstance(pattern[0], int) else ()
             self.success_timer = self.success_duration
             self.player_attack_timer = self.player_attack_duration
-            self._play_magic_spell_sound()
+            self.audio.play_magic_spell()
         if self.session.last_spell_cast:
             self.spell_pattern = pattern
             self.spell_timer = self.spell_duration
@@ -1769,9 +1387,8 @@ class ExorcismGame:
             isinstance(boss, LucielBoss)
             and not boss_was_hidden
             and boss.hidden_remaining > 0
-            and self.luciel_disappear_sound is not None
         ):
-            self.luciel_disappear_sound.play()
+            self.audio.play_sfx("luciel_disappear")
         for x, y, amount in self.session.defeated_events:
             self.reward_orbs.append(
                 {
@@ -1784,39 +1401,6 @@ class ExorcismGame:
         self.message_timer = 0.0
         self._set_result_flash(result)
         return result
-
-    def _play_magic_spell_sound(self) -> None:
-        if self.magic_spell_sound is not None:
-            self.magic_spell_channel.play(self.magic_spell_sound)
-
-    def _play_ghost_spawn_sound(self, ghost: Ghost) -> None:
-        if not self.boo_sounds:
-            return
-        channel = random.choice(self.boo_sounds).play()
-        if channel is not None:
-            self.ghost_boo_channels[id(ghost)] = channel
-
-    def _play_ghost_defeated_sound(self, ghost: Ghost) -> None:
-        channel = self.ghost_boo_channels.pop(id(ghost), None)
-        if channel is not None:
-            channel.stop()
-            if self.ghost_defeated_sound is not None:
-                channel.play(self.ghost_defeated_sound)
-        elif self.ghost_defeated_sound is not None:
-            self.ghost_defeated_sound.play()
-
-    def _stop_all_ghost_boo(self) -> None:
-        for channel in self.ghost_boo_channels.values():
-            channel.stop()
-        self.ghost_boo_channels.clear()
-
-    def _remove_inactive_ghost_boo_channels(self) -> None:
-        active_ids = {id(ghost) for ghost in self.session.ghosts}
-        for ghost_id, channel in list(self.ghost_boo_channels.items()):
-            if ghost_id not in active_ids or not channel.get_busy():
-                if ghost_id not in active_ids:
-                    channel.stop()
-                self.ghost_boo_channels.pop(ghost_id, None)
 
     def _node_at(
         self,
@@ -2006,7 +1590,7 @@ class ExorcismGame:
                 if spawned:
                     for ghost in self.session.ghosts:
                         if id(ghost) not in existing_ghost_ids:
-                            self._play_ghost_spawn_sound(ghost)
+                            self.audio.play_ghost_spawn(ghost)
                 self.spawn_timer = (
                     max(0.75, 2.15 - self.session.wave * 0.1)
                     if spawned
@@ -2021,7 +1605,7 @@ class ExorcismGame:
                     PLAYER_POSITION,
                 )
                 if support is not None:
-                    self._play_ghost_spawn_sound(support)
+                    self.audio.play_ghost_spawn(support)
                     self.seal_support_timer = 1.4
                 else:
                     self.seal_support_timer = 0.35
@@ -2029,7 +1613,9 @@ class ExorcismGame:
         escaped = self.session.update_ghosts(
             seconds, PLAYER_POSITION, PLAYER_RADIUS
         )
-        self._remove_inactive_ghost_boo_channels()
+        self.audio.remove_inactive_ghost_boo(
+            {id(ghost) for ghost in self.session.ghosts}
+        )
         boss = self.session.boss
         if (
             self.session.boss_battle
@@ -2046,8 +1632,7 @@ class ExorcismGame:
                 self._start_boss_epilogue_transition()
             return
         if escaped:
-            if self.attacked_sound is not None:
-                self.attacked_sound.play()
+            self.audio.play_sfx("attacked")
             self.message_timer = 1.8
             self.flash_color = RED
             self.flash_timer = 0.22
@@ -2080,9 +1665,7 @@ class ExorcismGame:
     def _update_tutorial(self, seconds: float) -> None:
         self.tutorial_video.update(seconds)
         if self.tutorial_video.ended:
-            if self.tutorial_video_channel is not None:
-                self.tutorial_video_channel.stop()
-                self.tutorial_video_channel = None
+            self.audio.stop_video("tutorial")
             self.tutorial_reveal_elapsed = min(
                 self.tutorial_reveal_duration,
                 self.tutorial_reveal_elapsed + seconds,
@@ -2133,9 +1716,7 @@ class ExorcismGame:
         else:
             self.story_video.update(seconds)
             if self.story_video.ended:
-                if self.story_video_channel is not None:
-                    self.story_video_channel.stop()
-                    self.story_video_channel = None
+                self.audio.stop_video("story")
                 self._activate_story_dialogue()
         if not self.story_dialogue_active:
             return
@@ -2166,13 +1747,8 @@ class ExorcismGame:
                 if self.story_dialogue_index < len(self.story_dialogue_speakers)
                 else "PETER"
             )
-            speak_sound = {
-                "PETER": self.peter_speak_sound,
-                "LUCIEL": self.luciel_speak_sound,
-            }.get(speaker_name)
-            if speak_sound is not None:
-                for _ in range(self.story_dialogue_spoken_pairs, spoken_pairs):
-                    speak_sound.play()
+            for _ in range(self.story_dialogue_spoken_pairs, spoken_pairs):
+                self.audio.play_speak(speaker_name)
             self.story_dialogue_visible_characters = visible_characters
             self.story_dialogue_spoken_pairs = spoken_pairs
             typing_duration = (
@@ -2249,9 +1825,7 @@ class ExorcismGame:
         if self.stage_end_video is not None and not self.stage_end_video.ended:
             self.stage_end_video.update(seconds)
             if self.stage_end_video.ended:
-                if self.stage_end_video_channel is not None:
-                    self.stage_end_video_channel.stop()
-                    self.stage_end_video_channel = None
+                self.audio.stop_video("stage_end")
                 self._prepare_weaver_battle()
                 self.state = "playing"
         elif self.stage_end_video is None or self.stage_end_video.ended:
@@ -2265,9 +1839,7 @@ class ExorcismGame:
         ):
             self.weaver_epilogue_video.update(seconds)
             if self.weaver_epilogue_video.ended:
-                if self.weaver_epilogue_video_channel is not None:
-                    self.weaver_epilogue_video_channel.stop()
-                    self.weaver_epilogue_video_channel = None
+                self.audio.stop_video("weaver_epilogue")
                 self._start_weaver_stage_three_dialogue()
         else:
             self._start_weaver_stage_three_dialogue()
@@ -2305,9 +1877,7 @@ class ExorcismGame:
         if self.stage_three_video is not None and not self.stage_three_video.ended:
             self.stage_three_video.update(seconds)
             if self.stage_three_video.ended:
-                if self.stage_three_video_channel is not None:
-                    self.stage_three_video_channel.stop()
-                    self.stage_three_video_channel = None
+                self.audio.stop_video("stage_three")
                 if self.stage_three_video_number == 7:
                     self._start_stage_three_video(8)
                     return
@@ -2393,26 +1963,22 @@ class ExorcismGame:
         if damage:
             self.flash_color = RED
             self.flash_timer = 0.3
-            attack_sound = {
-                "piton": self.piton_attack_sound,
-                "weaver": self.weaver_attack_sound,
-                "luciel_magic": self.luciel_magic_attack_sound,
-            }.get(self.session.last_boss_damage_source)
-            if attack_sound is not None:
-                attack_sound.play()
+            self.audio.play_sfx({
+                "piton": "piton_attack",
+                "weaver": "weaver_attack",
+                "luciel_magic": "luciel_magic_attack",
+            }.get(self.session.last_boss_damage_source))
         if (
             isinstance(boss, WeaverBoss)
             and set(boss.active_web_lanes) - web_lanes_before
-            and self.weaver_web_sound is not None
         ):
-            self.weaver_web_sound.play()
+            self.audio.play_sfx("weaver_web")
         if (
             isinstance(boss, LucielBoss)
             and not boss_was_hidden
             and boss.hidden_remaining > 0
-            and self.luciel_disappear_sound is not None
         ):
-            self.luciel_disappear_sound.play()
+            self.audio.play_sfx("luciel_disappear")
         if boss.defeated:
             return
         support_timer_rate = (
@@ -2434,7 +2000,7 @@ class ExorcismGame:
                 PLAYER_POSITION,
             )
             for ghost in spawned:
-                self._play_ghost_spawn_sound(ghost)
+                self.audio.play_ghost_spawn(ghost)
             if spawned:
                 self.boss_support_timer = 2.0
             return
@@ -2473,7 +2039,7 @@ class ExorcismGame:
                 )
                 if ghost is not None:
                     spawned_ghosts.append(ghost)
-                    self._play_ghost_spawn_sound(ghost)
+                    self.audio.play_ghost_spawn(ghost)
             intervals = (3.8, 2.7, 1.8)
             if isinstance(boss, LucielBoss):
                 interval = (2.2, 3.2, 4.0, 3.6)[boss.row_index]
@@ -2510,7 +2076,7 @@ class ExorcismGame:
                 PLAYER_POSITION,
             )
             if ghost is not None:
-                self._play_ghost_spawn_sound(ghost)
+                self.audio.play_ghost_spawn(ghost)
         self.luciel_orbit_spawn_index += 1
         self.luciel_orbit_spawn_pairs_remaining -= 1
         self.luciel_orbit_spawn_timer = 0.5
@@ -2892,12 +2458,12 @@ class ExorcismGame:
         self._draw_volume_slider(
             "BACKGROUND MUSIC",
             self.bgm_slider_rect,
-            self.bgm_volume,
+            self.audio.bgm_volume,
         )
         self._draw_volume_slider(
             "SOUND EFFECTS",
             self.sfx_slider_rect,
-            self.sfx_volume,
+            self.audio.sfx_volume,
         )
         self._draw_menu_button(self.settings_back_button)
 
@@ -4405,16 +3971,6 @@ class ExorcismGame:
                     color,
                     [(x - 10, y + 2), (x + 24, y + 2), (x + 7, y + 23)],
                 )
-
-    def _grayscale_surface(self, source: pygame.Surface) -> pygame.Surface:
-        gray = source.copy()
-        width, height = gray.get_size()
-        for y in range(height):
-            for x in range(width):
-                red, green, blue, alpha = gray.get_at((x, y))
-                value = round((red * 0.299 + green * 0.587 + blue * 0.114) * 0.62)
-                gray.set_at((x, y), (value, value, value, alpha))
-        return gray
 
     def _draw_spell_bookmark(self) -> None:
         spell_seal_alert = (

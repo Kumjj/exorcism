@@ -7,6 +7,8 @@ import math
 import random
 from typing import Deque, Iterable, Optional, Sequence, TypeAlias
 
+# 담당: 게임 기획, 유령·패턴 기믹 설계, 테스트 및 오류 수정
+# 구현: AI 보조를 활용해 코드를 작성하고 직접 검토·수정함
 
 Pattern = tuple[int, ...]
 PatternAttempt: TypeAlias = Pattern | tuple[Pattern, Pattern]
@@ -244,6 +246,32 @@ class GhostSpec:
     color: tuple[int, int, int]
 
 
+class _PatternStack:
+    """Per-pattern list stored internally as a stack (reverse display order).
+
+    Reads and writes always use *display* order (index 0 = the left-most
+    pattern the player sees and clears first), so the rest of the game and the
+    tests are unchanged.  Internally the backing list is kept reversed, which
+    lets :meth:`Ghost.remove_first_pattern` drop the active pattern with a plain
+    ``list.pop()`` (stack behavior) instead of ``pop(0)``.  The seal, mirror
+    axis and start-lock lists use the same descriptor so they stay aligned with
+    the patterns.
+    """
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        self._name = "_stack_" + name
+
+    def __get__(self, obj: object, objtype: type | None = None) -> object:
+        if obj is None:
+            return self
+        return list(reversed(getattr(obj, self._name)))
+
+    def __set__(self, obj: object, value: object) -> None:
+        if isinstance(value, _PatternStack):  # no argument given: use empty list
+            value = []
+        setattr(obj, self._name, list(reversed(value)))
+
+
 @dataclass
 class Ghost:
     RESONANCE_DURATION = 3.0
@@ -256,7 +284,7 @@ class Ghost:
     target_y: float = 0.0
     radius: int = 32
     pulse: float = 0.0
-    remaining_patterns: list[PatternAttempt] = field(default_factory=list)
+    remaining_patterns: list[PatternAttempt] = _PatternStack()
     vanishing: bool = False
     fade_remaining: float = 0.0
     fade_duration: float = 0.85
@@ -302,9 +330,9 @@ class Ghost:
     crease_axis: str = ""
     crease_source_pattern: Pattern = ()
     crease_target_pattern: Pattern = ()
-    crease_axes: list[str] = field(default_factory=list)
-    start_locked_slots: list[bool] = field(default_factory=list)
-    partial_slots: list[bool] = field(default_factory=list)
+    crease_axes: list[str] = _PatternStack()
+    start_locked_slots: list[bool] = _PatternStack()
+    partial_slots: list[bool] = _PatternStack()
     removed_start_locked: bool = False
     removed_partial: bool = False
     sealed_slots: set[int] = field(default_factory=set)
@@ -557,18 +585,20 @@ class Ghost:
         return True
 
     def remove_first_pattern(self) -> bool:
-        if self.vanishing or not self.remaining_patterns:
+        # The display-front pattern is the top of the internal stack, so it is
+        # removed with ``pop()`` (no index shuffling) rather than ``pop(0)``.
+        if self.vanishing or not self._stack_remaining_patterns:
             return False
-        self.pattern_transition_from_count = len(self.remaining_patterns)
-        self.removed_pattern = self.remaining_patterns.pop(0)
+        self.pattern_transition_from_count = len(self._stack_remaining_patterns)
+        self.removed_pattern = self._stack_remaining_patterns.pop()
         self.removed_start_locked = (
-            self.start_locked_slots.pop(0)
-            if self.start_locked_slots
+            self._stack_start_locked_slots.pop()
+            if self._stack_start_locked_slots
             else False
         )
         self.removed_partial = (
-            self.partial_slots.pop(0)
-            if self.partial_slots
+            self._stack_partial_slots.pop()
+            if self._stack_partial_slots
             else False
         )
         self.sealed_slots = {
@@ -576,11 +606,11 @@ class Ghost:
             for index in self.sealed_slots
             if index > 0
         }
-        if self.crease_axes:
-            self.crease_axes.pop(0)
+        if self._stack_crease_axes:
+            self._stack_crease_axes.pop()
         self.pattern_transition_elapsed = 0.0
         self.hit_reaction_elapsed = 0.0
-        if not self.remaining_patterns:
+        if not self._stack_remaining_patterns:
             self.vanishing = True
             self.fade_remaining = self.fade_duration
         return True
@@ -2349,7 +2379,7 @@ class GameSession:
             ghost.forbidden_patterns.clear()
             ghost.start_locked_slots = [False]
             ghost.partial_slots = [False]
-            ghost.crease_axes.clear()
+            ghost.crease_axes = []
             ghost.crease_axis = ""
             ghost.crease_source_pattern = ()
             ghost.crease_target_pattern = ()
@@ -2393,7 +2423,7 @@ class GameSession:
             ghost.forbidden_patterns.clear()
             ghost.start_locked_slots = [False for _ in ghost.remaining_patterns]
             ghost.partial_slots = [False for _ in ghost.remaining_patterns]
-            ghost.crease_axes.clear()
+            ghost.crease_axes = []
             ghost.crease_axis = ""
             ghost.crease_source_pattern = ()
             ghost.crease_target_pattern = ()
@@ -2408,9 +2438,10 @@ class GameSession:
                 )
             ]
             layered = self.rng.choice(layered_candidates)
-            ghost.remaining_patterns[0] = tuple(
+            new_active = tuple(
                 mirrored_pattern(layer, axis) for layer in layered
             )
+            ghost.remaining_patterns = [new_active] + ghost.remaining_patterns[1:]
             ghost.crease_axes = [axis] + ghost.crease_axes[1:]
             ghost.crease_axis = axis
             ghost.crease_source_pattern = layered[0]

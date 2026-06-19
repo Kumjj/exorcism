@@ -2115,6 +2115,42 @@ class GameSessionTests(unittest.TestCase):
         self.assertEqual(crease.crease_axes, ["x"])
         self.assertEqual(self.session.judge_pattern(second), PatternResult.HIT)
 
+    def test_normal_ghost_patterns_are_stored_as_a_reversed_stack(self) -> None:
+        ghost = Ghost(
+            GHOST_SPECS[0],
+            700,
+            300,
+            400,
+            300,
+            remaining_patterns=[(0, 1, 2), (3, 4, 5), (6, 7, 8)],
+            crease_axes=["x", "y", "origin"],
+            kind=GhostKind.CREASE,
+        )
+
+        # Internally the patterns and their per-pattern info are kept in reverse
+        # display order so the active pattern sits on top of the stack.
+        self.assertEqual(
+            ghost._stack_remaining_patterns,
+            [(6, 7, 8), (3, 4, 5), (0, 1, 2)],
+        )
+        self.assertEqual(ghost._stack_crease_axes, ["origin", "y", "x"])
+
+        # The player-facing view stays in left-to-right display order.
+        self.assertEqual(
+            ghost.remaining_patterns,
+            [(0, 1, 2), (3, 4, 5), (6, 7, 8)],
+        )
+        self.assertEqual(ghost.crease_axes, ["x", "y", "origin"])
+        self.assertEqual(ghost.pattern, (0, 1, 2))
+
+        # Clearing removes the left-most pattern first (a stack pop()).
+        ghost.remove_first_pattern()
+
+        self.assertEqual(ghost.removed_pattern, (0, 1, 2))
+        self.assertEqual(ghost.remaining_patterns, [(3, 4, 5), (6, 7, 8)])
+        self.assertEqual(ghost.crease_axes, ["y", "origin"])
+        self.assertEqual(ghost._stack_remaining_patterns, [(6, 7, 8), (3, 4, 5)])
+
     def test_creep_spawns_with_at_least_two_patterns(self) -> None:
         found = None
         self.session.stage = 2
